@@ -1,0 +1,263 @@
+import sqlite3
+import json
+import numpy as np
+from typing import Dict
+from dataclasses import asdict
+from data.classes import SimulationConfig, SimulationResult
+
+class SimulationDatabase:
+    def __init__(self, path: str):
+        self.path = path
+        self.conn = sqlite3.connect(path)
+        self._init_schema()
+
+    def _init_schema(self):
+        cur = self.conn.cursor()
+
+        # --- existing tables: runs, samples ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            idx INTEGER NOT NULL,
+            t REAL NOT NULL,
+            jd REAL NOT NULL,
+
+            q0 REAL, q1 REAL, q2 REAL, q3 REAL,
+            bgx REAL, bgy REAL, bgz REAL,
+            wx_true REAL, wy_true REAL, wz_true REAL,
+            wx_meas REAL, wy_meas REAL, wz_meas REAL,
+            bx_meas REAL, by_meas REAL, bz_meas REAL,
+            sx_meas REAL, sy_meas REAL, sz_meas REAL,
+            st_q0 REAL, st_q1 REAL, st_q2 REAL, st_q3 REAL,
+
+            FOREIGN KEY(run_id) REFERENCES runs(id)
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_samples_run ON samples(run_id, idx);")
+
+        # --- NEW: estimation runs ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS est_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sim_run_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(sim_run_id) REFERENCES runs(id)
+        );
+        """)
+
+        # --- NEW: estimation states ---
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS est_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            est_run_id INTEGER NOT NULL,
+            idx INTEGER NOT NULL,
+            t REAL NOT NULL,
+            jd REAL NOT NULL,
+
+            q0 REAL, q1 REAL, q2 REAL, q3 REAL,
+            bgx REAL, bgy REAL, bgz REAL,
+
+            FOREIGN KEY(est_run_id) REFERENCES est_runs(id)
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_est_states_run ON est_states(est_run_id, idx);")
+
+        self.conn.commit()
+
+
+    def insert_run(self, result: SimulationResult) -> int:
+        """Insert a new run and all its samples; return run_id."""
+        cur = self.conn.cursor()
+
+        cfg_dict: Dict = asdict(result.config)
+        cur.execute(
+            "INSERT INTO runs (name, config_json) VALUES (?, ?);",
+            (result.config.run_name, json.dumps(cfg_dict))
+        )
+        run_id = cur.lastrowid
+
+        # Bulk insert samples
+        rows = []
+        N = result.t.shape[0]
+        for k in range(N):
+            q = result.q_true[k]
+            bg = result.b_g_true[k]
+            w_true = result.omega_true[k]
+            w_meas = result.omega_meas[k]
+            b_meas = result.mag_meas[k]
+            s_meas = result.sun_meas[k]
+            st = result.st_meas[k]
+
+            rows.append((
+                run_id, k, float(result.t[k]), float(result.jd[k]),
+                float(q[0]), float(q[1]), float(q[2]), float(q[3]),
+                float(bg[0]), float(bg[1]), float(bg[2]),
+                float(w_true[0]), float(w_true[1]), float(w_true[2]),
+                float(w_meas[0]), float(w_meas[1]), float(w_meas[2]),
+                float(b_meas[0]), float(b_meas[1]), float(b_meas[2]),
+                float(s_meas[0]), float(s_meas[1]), float(s_meas[2]),
+                float(st[0]), float(st[1]), float(st[2]), float(st[3]),
+            ))
+
+        cur.executemany("""
+            INSERT INTO samples (
+                run_id, idx, t, jd,
+                q0, q1, q2, q3,
+                bgx, bgy, bgz,
+                wx_true, wy_true, wz_true,
+                wx_meas, wy_meas, wz_meas,
+                bx_meas, by_meas, bz_meas,
+                sx_meas, sy_meas, sz_meas,
+                st_q0, st_q1, st_q2, st_q3
+            ) VALUES (?, ?, ?, ?,
+                      ?, ?, ?, ?,
+                      ?, ?, ?,
+                      ?, ?, ?,
+                      ?, ?, ?,
+                      ?, ?, ?,
+                      ?, ?, ?,
+                      ?, ?, ?, ?);
+        """, rows)
+
+        self.conn.commit()
+        return run_id
+    
+    def insert_estimation_run(self,
+                              sim_run_id: int,
+                              t: np.ndarray,
+                              jd: np.ndarray,
+                              states: list,
+                              name: str = "eskf") -> int:
+        """
+        Store ESKF results for one simulation run.
+
+        Args:
+            sim_run_id:  id in 'runs' table this estimation corresponds to
+            t, jd:       time vectors (same length as states)
+            states:      list of EskfState
+            name:        label for this estimation run (e.g. 'eskf_baseline')
+
+        Returns:
+            est_run_id: primary key in est_runs.
+        """
+        cur = self.conn.cursor()
+
+        # 1) create est_run row
+        cur.execute(
+            "INSERT INTO est_runs (sim_run_id, name) VALUES (?, ?);",
+            (sim_run_id, name)
+        )
+        est_run_id = cur.lastrowid
+
+        # 2) bulk insert est_states
+        N = len(states)
+        assert N == len(t) == len(jd)
+
+        rows = []
+        for k in range(N):
+            x_est = states[k]
+            q = x_est.nom.ori.as_array()
+            bg = np.asarray(x_est.nom.gyro_bias, float).reshape(3)
+
+            rows.append((
+                est_run_id,
+                k,
+                float(t[k]),
+                float(jd[k]),
+                float(q[0]), float(q[1]), float(q[2]), float(q[3]),
+                float(bg[0]), float(bg[1]), float(bg[2]),
+            ))
+
+        cur.executemany("""
+            INSERT INTO est_states (
+                est_run_id, idx, t, jd,
+                q0, q1, q2, q3,
+                bgx, bgy, bgz
+            ) VALUES (?, ?, ?, ?,
+                      ?, ?, ?, ?,
+                      ?, ?, ?);
+        """, rows)
+
+        self.conn.commit()
+        return est_run_id
+
+    def load_run(self, run_id: int) -> SimulationResult:
+        """Reconstruct a SimulationResult from the database."""
+        cur = self.conn.cursor()
+
+        cur.execute("SELECT name, config_json FROM runs WHERE id=?;", (run_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"No run with id={run_id}")
+        name, cfg_json = row
+        cfg_dict = json.loads(cfg_json)
+        cfg = SimulationConfig(**cfg_dict)
+
+        cur.execute("""
+            SELECT idx, t, jd,
+                   q0, q1, q2, q3,
+                   bgx, bgy, bgz,
+                   wx_true, wy_true, wz_true,
+                   wx_meas, wy_meas, wz_meas,
+                   bx_meas, by_meas, bz_meas,
+                   sx_meas, sy_meas, sz_meas,
+                   st_q0, st_q1, st_q2, st_q3
+            FROM samples
+            WHERE run_id=?
+            ORDER BY idx ASC;
+        """, (run_id,))
+        rows = cur.fetchall()
+
+        N = len(rows)
+        t = np.zeros(N)
+        jd = np.zeros(N)
+        q_true = np.zeros((N, 4))
+        b_g_true = np.zeros((N, 3))
+        omega_true = np.zeros((N, 3))
+        omega_meas = np.zeros((N, 3))
+        mag_meas = np.zeros((N, 3))
+        sun_meas = np.zeros((N, 3))
+        st_meas = np.zeros((N, 4))
+
+        for i, r in enumerate(rows):
+            (_, t_i, jd_i,
+             q0,q1,q2,q3,
+             bgx,bgy,bgz,
+             wxt,wyt,wzt,
+             wxm,wym,wzm,
+             bx,by,bz,
+             sx,sy,sz,
+             st0,st1,st2,st3) = r
+
+            t[i] = t_i
+            jd[i] = jd_i
+            q_true[i] = [q0,q1,q2,q3]
+            b_g_true[i] = [bgx,bgy,bgz]
+            omega_true[i] = [wxt,wyt,wzt]
+            omega_meas[i] = [wxm,wym,wzm]
+            mag_meas[i] = [bx,by,bz]
+            sun_meas[i] = [sx,sy,sz]
+            st_meas[i] = [st0,st1,st2,st3]
+
+        return SimulationResult(
+            t=t, jd=jd,
+            q_true=q_true,
+            b_g_true=b_g_true,
+            omega_true=omega_true,
+            omega_meas=omega_meas,
+            mag_meas=mag_meas,
+            sun_meas=sun_meas,
+            st_meas=st_meas,
+            config=cfg,
+        )

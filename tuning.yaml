@@ -1,0 +1,24 @@
+sensors:
+  gyro:
+    gyro_std: 0.001 # rad/s
+    noise_rw: 0.0001 # rad/sqrt(s)
+    dt: 0.02
+  mag:
+    mag_std: 0.01 # arbitrary units
+    dt : 0.2
+  sun:
+    sun_std: 0.01 # arbitrary units
+    dt : 0.5
+  star:
+    st_std: 0.0001 # rad
+    dt : 1.0
+
+simulation:
+  duration: 3600.0 # seconds
+  dt: 0.02 # seconds
+  start_jd : 2459980.5
+  run_name: "test_run_002"
+  gyro_noise_scale: 1.0
+  mag_noise_scale: 1.0
+  sun_noise_scale: 1.0
+  star_noise_scale: 1.0
