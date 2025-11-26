@@ -207,24 +207,12 @@ class FGO:
 
     # -------------------- CONVENIENCE RUNNER --------------------
 
-    def run_on_simulation(
-        self,
-        sim_run_id: int,
-        env: OrbitEnvironmentModel,
-        db_path: str = "simulations.db",
-        est_name: str = "fgo",
-        batch_duration: float = 5.0,
-    ) -> int:
-        """Build factor graphs in batches from a stored simulation and optimize each.
-
-        A full simulation can contain thousands of measurements because of the small
-        sampling time (dt = 0.02). Optimizing all of them at once can consume too much
-        memory, so this method windows the problem into batches of roughly
-        ``batch_duration`` seconds. Adjacent batches overlap by one state to preserve
-        continuity, using the final state from the previous batch as the prior for the
-        next.
-        """
-
+    def run_on_simulation(self,
+                          sim_run_id: int,
+                          env: OrbitEnvironmentModel,
+                          db_path: str = "simulations.db",
+                          est_name: str = "fgo") -> int:
+        """Build a factor graph from a stored simulation and optimize it."""
         from data.db import SimulationDatabase
 
         db = SimulationDatabase(db_path)
@@ -238,82 +226,43 @@ class FGO:
         st_meas_log = result.st_meas
 
         N = t.shape[0]
-        optimized_states: List[EskfState] = []
-        k_start = 0
-        prev_last_state: Optional[EskfState] = None
 
-        while k_start < N:
-            # Determine the end index for this batch based on elapsed time.
-            k_end = k_start + 1
-            while k_end < N and t[k_end] - t[k_start] < batch_duration:
-                k_end += 1
+        # ----- initial states (prior on first state) -----
+        q0 = Quaternion.from_array(result.q_true[0])
+        b0 = np.zeros(3)
+        err0 = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
+        x0 = EskfState(nom=NominalState(ori=q0, gyro_bias=b0), err=err0)
+        self.add_state(x0)
+        self.add_prior(0, x0.nom, cov=np.diag([1e-4, 1e-4, 1e-4, 1e-6, 1e-6, 1e-6]))
 
-            batch_graph = FGO(max_iters=self.max_iters, tol=self.tol)
+        for k in range(1, N):
+            q_init = Quaternion.from_array(result.q_true[k])
+            bg_init = np.zeros(3)
+            err_init = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
+            x_init = EskfState(nom=NominalState(ori=q_init, gyro_bias=bg_init), err=err_init)
+            self.add_state(x_init)
 
-            # ----- initial state and prior for this batch -----
-            if prev_last_state is None:
-                q0 = Quaternion.from_array(result.q_true[k_start])
-                b0 = np.zeros(3)
-            else:
-                q0 = prev_last_state.nom.ori
-                b0 = prev_last_state.nom.gyro_bias
-            err0 = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
-            x0 = EskfState(nom=NominalState(ori=q0, gyro_bias=b0), err=err0)
-            batch_graph.add_state(x0)
-            batch_graph.add_prior(0, x0.nom, cov=np.diag([1e-4, 1e-4, 1e-4, 1e-6, 1e-6, 1e-6]))
+            dt_k = t[k] - t[k - 1]
+            self.add_gyro_factor(k - 1, k, omega_meas_log[k], dt_k)
 
-            for k in range(k_start + 1, k_end):
-                q_init = Quaternion.from_array(result.q_true[k])
-                bg_init = np.zeros(3)
-                err_init = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
-                x_init = EskfState(nom=NominalState(ori=q_init, gyro_bias=bg_init), err=err_init)
-                batch_graph.add_state(x_init)
+            r_eci = env.get_r_eci(jd[k])
+            B_eci = env.get_B_eci(r_eci, jd[k])
+            s_eci = env.get_sun_eci(jd[k])
 
-                dt_k = t[k] - t[k - 1]
-                batch_graph.add_gyro_factor(k - 1 - k_start, k - k_start, omega_meas_log[k], dt_k)
+            mag_meas = mag_meas_log[k]
+            if not np.any(np.isnan(mag_meas)):
+                self.add_measurement(idx=k, y=mag_meas, sensor_type=SensorType.MAGNETOMETER, B_n=B_eci)
 
-                r_eci = env.get_r_eci(jd[k])
-                B_eci = env.get_B_eci(r_eci, jd[k])
-                s_eci = env.get_sun_eci(jd[k])
+            sun_meas = sun_meas_log[k]
+            if not np.any(np.isnan(sun_meas)):
+                self.add_measurement(idx=k, y=sun_meas, sensor_type=SensorType.SUN_VECTOR, s_n=s_eci)
 
-                mag_meas = mag_meas_log[k]
-                if not np.any(np.isnan(mag_meas)):
-                    batch_graph.add_measurement(
-                        idx=k - k_start,
-                        y=mag_meas,
-                        sensor_type=SensorType.MAGNETOMETER,
-                        B_n=B_eci,
-                    )
+            st_meas = st_meas_log[k]
+            if not np.any(np.isnan(st_meas)):
+                q_meas = Quaternion.from_array(st_meas)
+                self.add_measurement(idx=k, y=q_meas, sensor_type=SensorType.STAR_TRACKER)
 
-                sun_meas = sun_meas_log[k]
-                if not np.any(np.isnan(sun_meas)):
-                    batch_graph.add_measurement(
-                        idx=k - k_start,
-                        y=sun_meas,
-                        sensor_type=SensorType.SUN_VECTOR,
-                        s_n=s_eci,
-                    )
-
-                st_meas = st_meas_log[k]
-                if not np.any(np.isnan(st_meas)):
-                    q_meas = Quaternion.from_array(st_meas)
-                    batch_graph.add_measurement(
-                        idx=k - k_start,
-                        y=q_meas,
-                        sensor_type=SensorType.STAR_TRACKER,
-                    )
-
-            batch_states = batch_graph.optimize()
-
-            # Skip the overlapping prior state for all but the first batch to avoid
-            # duplicating timestamps.
-            if prev_last_state is None:
-                optimized_states.extend(batch_states)
-            else:
-                optimized_states.extend(batch_states[1:])
-
-            prev_last_state = optimized_states[-1]
-            k_start = k_end - 1  # overlap last state with next batch
+        optimized_states = self.optimize()
 
         est_run_id = db.insert_estimation_run(
             sim_run_id=sim_run_id,
