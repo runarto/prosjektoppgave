@@ -5,13 +5,13 @@ from typing import Optional
 
 import numpy as np
 
-from utilities.states import NominalState, EskfState
-from utilities.gaussian import MultiVarGauss
+from logging_config import get_logger
+from utilities.states import EskfState, SensorType
 from utilities.quaternion import Quaternion
 from utilities.process_model import ProcessModel
 from utilities.sensors import SensorGyro, SensorMagnetometer, SensorStarTracker, SensorSunVector
-from utilities.utils import SensorType
 
+logger = get_logger(__name__)
 
 @dataclass
 class ESKF:
@@ -19,11 +19,11 @@ class ESKF:
     P0: np.ndarray              # initial error covariance
 
     def __post_init__(self):
-        self.sens_mag = SensorMagnetometer(mag_std=0.01)
-        self.sv       = SensorSunVector(sun_std=0.01)
-        self.st       = SensorStarTracker(st_std=1e-4)
-        self.gyro     = SensorGyro(gyro_std=1e-3)
-        self.process = ProcessModel(sigma_g=1e-3, sigma_bg=1e-5)
+        self.sens_mag = SensorMagnetometer()
+        self.sv       = SensorSunVector()
+        self.st       = SensorStarTracker()
+        self.gyro     = SensorGyro()
+        self.process = ProcessModel()
 
     # ---------- PREDICT ----------
 
@@ -37,6 +37,12 @@ class ESKF:
         P_pred = self.process.propagate_covariance(P, x_est.nom, omega_meas, dt)
         x_est.err.cov = P_pred
         x_est.err.mean[:] = 0.0  # stays zero in ESKF
+        
+        logging_msg = (f"Predicted to t+{dt:.3f}s: "
+                       f"q = {x_est.nom.ori}, "
+                       f"b_g = {x_est.nom.gyro_bias}, "
+                       f"P = {x_est.err.cov}")
+        logger.debug(logging_msg)
 
         return x_est
 
@@ -130,5 +136,11 @@ class ESKF:
         x_est.inject_error(delta_x)          # you implement this
         x_est.err.mean[:] = 0.0
         x_est.err.cov = P_upd
+        
+        logging_msg = (f"Updated with {sensor_type.name}: "
+                       f"innovation = {innovation}, "
+                       f"K = {K}, "
+                       f"P = {x_est.err.cov}")
+        logger.debug(logging_msg)
 
         return x_est

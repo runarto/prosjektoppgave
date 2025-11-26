@@ -254,5 +254,5 @@ class AttitudePlotter:
 if __name__ == "__main__":
     plotter = AttitudePlotter(db_path="simulations.db")
     #plotter.animate_attitude(run_id=1, step=5, interval=100, save_path=None)
-    plotter.plot_euler_comparison(sim_run_id=1, est_run_id=1)
-    plotter.plot_attitude_error(sim_run_id=1, est_run_id=1)
+    plotter.plot_euler_comparison(sim_run_id=1, est_run_id=2)
+    plotter.plot_attitude_error(sim_run_id=1, est_run_id=2)

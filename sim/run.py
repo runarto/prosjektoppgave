@@ -1,12 +1,17 @@
 import numpy as np
+import copy
 
 from sim.eskf import ESKF
 from utilities.states import NominalState, EskfState
 from utilities.gaussian import MultiVarGauss
 from utilities.quaternion import Quaternion
-from utilities.utils import SensorType
+from utilities.states import SensorType
 from environment.environment import OrbitEnvironmentModel
 from data.db import SimulationDatabase
+
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class FilterRunner:
@@ -100,8 +105,7 @@ class FilterRunner:
                     sensor_type=SensorType.STAR_TRACKER,
                 )
 
-            # store snapshot
-            import copy
+            # store snapshot       
             states.append(copy.deepcopy(x_est))
 
         # save estimation results in DB
@@ -123,6 +127,6 @@ if __name__ == "__main__":
     )
     filter_runner = FilterRunner(env=env, eskf=eskf, db_path="simulations.db")
     
-    sim_run_id = 1  # Example simulation run ID
+    sim_run_id = 2  # Example simulation run ID
     est_run_id = filter_runner.run_on_simulation(sim_run_id=sim_run_id, est_name="eskf_baseline")
     print(f"Estimation run ID: {est_run_id}")

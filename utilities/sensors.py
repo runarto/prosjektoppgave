@@ -5,6 +5,9 @@ from utilities.gaussian import MultiVarGauss
 from utilities.quaternion import Quaternion
 from utilities.utils import get_skew_matrix, load_yaml
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 @dataclass
 class SensorGyro:
@@ -30,9 +33,18 @@ class SensorMagnetometer:
         config = load_yaml("config.yaml")
         self.mag_std = config["sensors"]["mag"]["mag_std"]
         self.dt = config["sensors"]["mag"]["dt"]
+        eps_R = 1e-12
+        var = max(self.mag_std**2, eps_R)
+        self.R = var * np.eye(3)
+        logger.debug(f"Magnetometer measurement noise covariance R set to:\n{self.R}")
 
     def __post_init__(self):
-        self.R = np.eye(3) * self.mag_std**2
+        eps_R = 1e-12
+        var = max(self.mag_std**2, eps_R)
+        self.R = var * np.eye(3)
+        logger.debug(f"Magnetometer measurement noise covariance R set to:\n{self.R}")
+        
+        
         
     def sample(self, q_true: Quaternion, b_eci: np.ndarray) -> np.ndarray:
         """Sample a magnetometer measurement from the nominal state.
@@ -117,6 +129,17 @@ class SensorSunVector:
         config = load_yaml("config.yaml")
         self.sun_std = config["sensors"]["sun"]["sun_std"]
         self.dt = config["sensors"]["sun"]["dt"]
+        eps_R = 1e-12
+        var = max(self.sun_std**2, eps_R)
+        self.R = var * np.eye(3)
+        logger.debug(f"Sun sensor measurement noise covariance R set to:\n{self.R}")
+        
+    def __post_init__(self):
+        eps_R = 1e-12
+        var = max(self.sun_std**2, eps_R)
+        self.R = var * np.eye(3)
+        logger.debug(f"Sun sensor measurement noise covariance R set to:\n{self.R}")
+        
 
     def H(self, x_nom: NominalState, s_n: np.ndarray) -> np.ndarray:
         """Jacobian wrt 6D error state [δθ; δb_g].
@@ -188,9 +211,16 @@ class SensorStarTracker:
         config = load_yaml("config.yaml")
         self.st_std = config["sensors"]["star"]["st_std"]
         self.dt = config["sensors"]["star"]["dt"]
+        eps_R = 1e-12
+        var = max(self.st_std**2, eps_R)
+        self.R = var * np.eye(3)
+        logger.debug(f"Star tracker measurement noise covariance R set to:\n{self.R}")
 
     def __post_init__(self):
-        self.R = np.eye(3) * self.st_std**2
+        eps_R = 1e-12
+        var = max(self.st_std**2, eps_R)
+        self.R = var * np.eye(3)
+        logger.debug(f"Star tracker measurement noise covariance R set to:\n{self.R}")
         
     def sample(self, q_true: Quaternion) -> Quaternion:
         """Sample a star tracker measurement from the true quaternion."""
@@ -234,12 +264,11 @@ class SensorStarTracker:
         q_err = q_meas ⊗ q_nom^{-1} ~ [1, 0.5 δθ] for small δθ.
         """
         q_nom_inv = q_nom.conjugate()
-        q_err = q_meas.multiply(q_nom_inv).normalize()
+        # δq ≈ q_nom^{-1} ⊗ q_meas
+        q_err = q_nom_inv.multiply(q_meas).normalize()
 
-        # small-angle approximation: q_err ≈ [1, 0.5*δθ]
         w = q_err.mu
         v = q_err.eta
-        # robust mapping: δθ = 2 * v for small angles
         return 2.0 * v
 
     def pred_from_est(self, x_est: EskfState, q_meas: Quaternion) -> MultiVarGauss[np.ndarray]:

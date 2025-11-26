@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from utilities.states import NominalState
-from utilities.utils import get_skew_matrix
+from utilities.utils import get_skew_matrix, load_yaml
 
 
 @dataclass
@@ -32,8 +32,11 @@ class ProcessModel:
 
         P_{k+1} = F P_k Fᵀ + G Q_d Gᵀ
     """
-    sigma_g: float   # gyro white noise std [rad/s]
-    sigma_bg: float  # gyro bias random-walk std [rad/s^2]
+    
+    def __init__(self):
+        config = load_yaml("config.yaml")
+        self.sigma_g = config["process_model"]["sigma_g"]
+        self.sigma_bg = config["process_model"]["sigma_bg"]
 
     @property
     def Q_c(self) -> np.ndarray:

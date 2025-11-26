@@ -99,11 +99,11 @@ class Quaternion:
     
     def diff_as_avec(self, other: 'Quaternion') -> np.ndarray:
         """
-        Calculate the difference between two quaternions as an angle vector (avec).
-        The difference is defined as the rotation needed to go from 'other' to 'self'.
+        Rotation needed to go from 'other' to 'self', with
+        q_self ≈ q_other ⊗ δq, δθ in body frame.
         """
-        q_diff = self.multiply(other.conjugate())
-        q_diff = Quaternion.normalized(q_diff)
+        # δq ≈ other^{-1} ⊗ self
+        q_diff = other.conjugate().multiply(self).normalize()
 
         angle = 2 * np.arccos(np.clip(q_diff.mu, -1.0, 1.0))
         if angle > np.pi:
@@ -115,6 +115,7 @@ class Quaternion:
         axis = q_diff.eta / np.sin(angle / 2.0)
         avec = axis * angle
         return avec
+
     
     @staticmethod
     def from_avec(avec: np.ndarray, eps: float = 1e-12) -> 'Quaternion':
