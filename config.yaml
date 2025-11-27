@@ -2,9 +2,9 @@ sensors:
   gyro:
     # Rate sensor: medium-grade MEMS gyro
     # ~0.03–0.05 deg/s noise per sample at 50 Hz
-    gyro_std: 3.0e-3      # rad/s
+    gyro_std: 3.0e-2      # rad/s
     # Bias random walk; gives slow drift over minutes–hours
-    noise_rw: 1.0e-5      # rad/sqrt(s)
+    noise_rw: 1.0e-4      # rad/sqrt(s)
     dt: 0.02
 
   mag:
@@ -34,6 +34,16 @@ process_model:
   # over mission timescales in the sim.
   sigma_bg: 5.0e-6        # rad/s^2
   dt: 0.02
+
+omega_profile:
+  amplitude:
+    x: 0.3                # rad/s
+    y: 0.2                # rad/s
+    z: 0.1                # rad/s
+  frequency:
+    x: 1/100.0            # Hz
+    y: 1/150.0            # Hz
+    z: 1/200.0            # Hz
 
 simulation:
   T: 600.0                # seconds

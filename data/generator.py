@@ -21,6 +21,7 @@ class AttitudeDataGenerator:
         self.sun = sun
         self.star_trk = star_trk
         self.db = SimulationDatabase(db_path)
+        self.config = load_yaml("config.yaml")
 
     @staticmethod
     def _dt_to_divisor(sensor_dt: float, base_dt: float, name: str) -> int:
@@ -38,9 +39,23 @@ class AttitudeDataGenerator:
                 f"{name}.dt={sensor_dt} not an integer multiple of base dt={base_dt}"
             )
         return n
+    
+    def _get_omega_profile(self, t: float) -> np.ndarray:   
+        A_x = self.config["omega_profile"]["amplitude"]["x"]
+        A_y = self.config["omega_profile"]["amplitude"]["y"]
+        A_z = self.config["omega_profile"]["amplitude"]["z"]
+        f_x = eval(self.config["omega_profile"]["frequency"]["x"])
+        f_y = eval(self.config["omega_profile"]["frequency"]["y"])
+        f_z = eval(self.config["omega_profile"]["frequency"]["z"])
+        
+        omega_x = A_x * np.sin(2 * np.pi * f_x * t)
+        omega_y = A_y * np.sin(2 * np.pi * f_y * t)
+        omega_z = A_z * np.sin(2 * np.pi * f_z * t)
+        
+        return np.array([omega_x, omega_y, omega_z])
 
     def run(self, cfg: SimulationConfig) -> None:
-        T, dt = cfg.T, cfg.dt
+        T, dt = self.config["simulation"]["T"], self.config["simulation"]["dt"]
         n_steps = int(np.floor(T / dt)) + 1
 
         # compute sampling divisors
@@ -68,7 +83,7 @@ class AttitudeDataGenerator:
         b_g_true = np.zeros(3)
 
         # true gyro-bias random walk std (could be moved into cfg)
-        sigma_bg_true = np.deg2rad(0.0005)  # [rad/s^2], example
+        sigma_bg_true = np.deg2rad(self.config["sensors"]["gyro"]["noise_rw"])
 
         for k in range(n_steps):
             t = t_vec[k]
@@ -80,11 +95,7 @@ class AttitudeDataGenerator:
             s_eci = self.env.get_sun_eci(jd)        # Sun direction in ECI (unit)
 
             # 2) True body rate profile
-            omega_true = np.array([
-                0.05 * np.sin(0.01 * t),
-                0.03 * np.sin(0.008 * t),
-                0.10 + 0.02 * np.sin(0.005 * t),
-            ])
+            omega_true = self._get_omega_profile(t)
             omega_true_log[k] = omega_true
 
             # 3) Propagate true attitude
@@ -143,7 +154,8 @@ class AttitudeDataGenerator:
             st_meas=st_meas_log,
             config=cfg,
         )
-        self.db.insert_run(result=result)
+        id = self.db.insert_run(result=result)
+        print(f"Simulation run '{id}' with ID stored in database.")
         return
 
     

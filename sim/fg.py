@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+from tqdm import tqdm
 
 from environment.environment import OrbitEnvironmentModel
 from logging_config import get_logger
@@ -12,6 +13,7 @@ from utilities.process_model import ProcessModel
 from utilities.quaternion import Quaternion
 from utilities.sensors import SensorMagnetometer, SensorStarTracker, SensorSunVector
 from utilities.states import EskfState, NominalState, SensorType
+from data.db import SimulationDatabase
 
 logger = get_logger(__name__)
 
@@ -93,8 +95,8 @@ class FGO:
         total_dim = 6 * len(self.states)
 
         for _ in range(self.max_iters):
-            residuals: List[np.ndarray] = []
-            jacobian_blocks: List[np.ndarray] = []
+            residuals: list[np.ndarray] = []
+            jacobian_blocks: list[np.ndarray] = []
 
             for factor in self.factors:
                 if factor.factor_type == "prior":
@@ -112,8 +114,16 @@ class FGO:
             r = np.concatenate(residuals)
             J = np.vstack(jacobian_blocks)
 
-            # Solve normal equations J delta = r using least squares
-            delta, *_ = np.linalg.lstsq(J, r, rcond=None)
+            # Gauss–Newton step: J δ ≈ -r
+            JT = J.T
+            JTJ = JT @ J
+            JTr = JT @ (-r)
+
+            try:
+                delta = np.linalg.solve(JTJ, JTr)
+            except np.linalg.LinAlgError:
+                logger.error("JTJ is singular; aborting optimization for this window")
+                break
 
             if np.linalg.norm(delta) < self.tol:
                 break
@@ -121,6 +131,7 @@ class FGO:
             self._apply_delta(delta)
 
         return self.states
+
 
     # -------------------- GRAPH HELPERS --------------------
 
@@ -197,7 +208,8 @@ class FGO:
         residual = sqrt_info @ innovation
 
         J = np.zeros((H.shape[0], total_dim))
-        J[:, 6 * state_idx:6 * (state_idx + 1)] = sqrt_info @ H
+        # Note the minus sign here
+        J[:, 6 * state_idx:6 * (state_idx + 1)] = -sqrt_info @ H
         return residual, J
 
     def _apply_delta(self, delta: np.ndarray) -> None:
@@ -205,18 +217,126 @@ class FGO:
             delta_i = delta[6 * idx:6 * (idx + 1)]
             state.inject_error(delta_i)
 
+    # -------------------- INTERNAL HELPERS --------------------
+
+    def _make_initial_state(self, q0_arr: np.ndarray) -> EskfState:
+        """Create initial EskfState from a quaternion array and default bias."""
+        q0 = Quaternion.from_array(q0_arr)
+        b0 = np.zeros(3)
+        err0 = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
+        return EskfState(nom=NominalState(ori=q0, gyro_bias=b0), err=err0)
+
+    def _add_step_state_and_factors(
+        self,
+        k: int,
+        t: np.ndarray,
+        jd: np.ndarray,
+        q_estimated: np.ndarray,
+        omega_meas_log: np.ndarray,
+        mag_meas_log: np.ndarray,
+        sun_meas_log: np.ndarray,
+        st_meas_log: np.ndarray,
+        env: OrbitEnvironmentModel,
+    ) -> None:
+        """Add state and all process/measurement factors for time index k."""
+
+        # new state, initialized from ESKF estimate
+        q_init = Quaternion.from_array(q_estimated[k])
+        bg_init = np.zeros(3)
+        err_init = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
+        x_init = EskfState(nom=NominalState(ori=q_init, gyro_bias=bg_init), err=err_init)
+
+        new_idx = self.add_state(x_init)
+        prev_idx = new_idx - 1
+
+        # process factor
+        dt_k = t[k] - t[k - 1]
+        self.add_gyro_factor(prev_idx, new_idx, omega_meas_log[k], dt_k)
+
+        # environment vectors
+        r_eci = env.get_r_eci(jd[k])
+        B_eci = env.get_B_eci(r_eci, jd[k])
+        s_eci = env.get_sun_eci(jd[k])
+
+        # magnetometer
+        mag_meas = mag_meas_log[k]
+        if not np.any(np.isnan(mag_meas)):
+            self.add_measurement(
+                idx=new_idx,
+                y=mag_meas,
+                sensor_type=SensorType.MAGNETOMETER,
+                B_n=B_eci,
+            )
+
+        # sun sensor
+        sun_meas = sun_meas_log[k]
+        if not np.any(np.isnan(sun_meas)):
+            self.add_measurement(
+                idx=new_idx,
+                y=sun_meas,
+                sensor_type=SensorType.SUN_VECTOR,
+                s_n=s_eci,
+            )
+
+        # star tracker
+        st_meas = st_meas_log[k]
+        if not np.any(np.isnan(st_meas)):
+            q_meas = Quaternion.from_array(st_meas)
+            self.add_measurement(
+                idx=new_idx,
+                y=q_meas,
+                sensor_type=SensorType.STAR_TRACKER,
+            )
+
+    @staticmethod
+    def _attitude_errors_deg_for_states(
+        states: list[EskfState],
+        start_k: int,
+        q_true: np.ndarray,
+    ) -> list[float]:
+        """Compute attitude error [deg] for a contiguous block of states."""
+        errors_deg: list[float] = []
+        for local_i, state in enumerate(states):
+            global_i = start_k + local_i
+            if global_i >= q_true.shape[0]:
+                break
+            q_true_k = Quaternion.from_array(q_true[global_i])
+            q_est_k = state.nom.ori
+            q_err = q_true_k.conjugate().multiply(q_est_k)
+            w = np.clip(abs(q_err.mu), -1.0, 1.0)
+            angle_rad = 2.0 * np.arccos(w)
+            errors_deg.append(float(np.degrees(angle_rad)))
+        return errors_deg
+
+    def _commit_window_to_global(
+        self,
+        optimized_states: Sequence[EskfState],
+        start_k: int,
+        est_states: list[EskfState | None],
+    ) -> None:
+        """Store all but the last optimized state into the global trajectory."""
+        for local_i in range(len(optimized_states) - 1):
+            global_i = start_k + local_i
+            if global_i >= len(est_states):
+                break
+            if est_states[global_i] is None:
+                est_states[global_i] = optimized_states[local_i]
+
     # -------------------- CONVENIENCE RUNNER --------------------
 
-    def run_on_simulation(self,
-                          sim_run_id: int,
-                          env: OrbitEnvironmentModel,
-                          db_path: str = "simulations.db",
-                          est_name: str = "fgo") -> int:
-        """Build a factor graph from a stored simulation and optimize it."""
-        from data.db import SimulationDatabase
+    def run_on_simulation(
+        self,
+        est_run_id: int,
+        sim_run_id: int,
+        env: OrbitEnvironmentModel,
+        db_path: str = "simulations.db",
+        est_name: str = "fgo",
+    ) -> int:
+        """Sliding-window factor graph on stored simulation."""
 
         db = SimulationDatabase(db_path)
         result = db.load_run(sim_run_id)
+        estimates = db.load_estimated_states(est_run_id)
 
         t = result.t
         jd = result.jd
@@ -224,51 +344,127 @@ class FGO:
         mag_meas_log = result.mag_meas
         sun_meas_log = result.sun_meas
         st_meas_log = result.st_meas
+        q_estimated = estimates.q_est
+        q_true = result.q_true
 
         N = t.shape[0]
+        window_size = 200  # tune for memory/speed
 
-        # ----- initial states (prior on first state) -----
-        q0 = Quaternion.from_array(result.q_true[0])
-        b0 = np.zeros(3)
-        err0 = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
-        x0 = EskfState(nom=NominalState(ori=q0, gyro_bias=b0), err=err0)
-        self.add_state(x0)
-        self.add_prior(0, x0.nom, cov=np.diag([1e-4, 1e-4, 1e-4, 1e-6, 1e-6, 1e-6]))
+        # full estimated trajectory storage
+        est_states: list[EskfState | None] = [None] * N
 
-        for k in range(1, N):
-            q_init = Quaternion.from_array(result.q_true[k])
-            bg_init = np.zeros(3)
-            err_init = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
-            x_init = EskfState(nom=NominalState(ori=q_init, gyro_bias=bg_init), err=err_init)
-            self.add_state(x_init)
+        # ----- initialize with first state from ESKF -----
+        x0 = self._make_initial_state(q_estimated[0])
 
-            dt_k = t[k] - t[k - 1]
-            self.add_gyro_factor(k - 1, k, omega_meas_log[k], dt_k)
+        self.states = []
+        self.factors = []
+        idx0 = self.add_state(x0)
+        assert idx0 == 0
 
-            r_eci = env.get_r_eci(jd[k])
-            B_eci = env.get_B_eci(r_eci, jd[k])
-            s_eci = env.get_sun_eci(jd[k])
+        # prior on first state
+        self.add_prior(
+            state_idx=0,
+            prior=x0.nom,
+            cov=np.diag([1e-4, 1e-4, 1e-4, 1e-6, 1e-6, 1e-6]),
+        )
 
-            mag_meas = mag_meas_log[k]
-            if not np.any(np.isnan(mag_meas)):
-                self.add_measurement(idx=k, y=mag_meas, sensor_type=SensorType.MAGNETOMETER, B_n=B_eci)
+        start_k = 0  # global index of self.states[0]
 
-            sun_meas = sun_meas_log[k]
-            if not np.any(np.isnan(sun_meas)):
-                self.add_measurement(idx=k, y=sun_meas, sensor_type=SensorType.SUN_VECTOR, s_n=s_eci)
+        pbar = tqdm(range(1, N), desc="FGO Sliding Window", unit="step")
+        for k in pbar:
+            # 1) extend graph with new time step
+            self._add_step_state_and_factors(
+                k=k,
+                t=t,
+                jd=jd,
+                q_estimated=q_estimated,
+                omega_meas_log=omega_meas_log,
+                mag_meas_log=mag_meas_log,
+                sun_meas_log=sun_meas_log,
+                st_meas_log=st_meas_log,
+                env=env,
+            )
 
-            st_meas = st_meas_log[k]
-            if not np.any(np.isnan(st_meas)):
-                q_meas = Quaternion.from_array(st_meas)
-                self.add_measurement(idx=k, y=q_meas, sensor_type=SensorType.STAR_TRACKER)
+            # 2) check window condition
+            window_full = len(self.states) >= window_size
+            last_step = (k == N - 1)
 
-        optimized_states = self.optimize()
+            if not (window_full or last_step):
+                continue
 
-        est_run_id = db.insert_estimation_run(
+            # 3) pre-optimization attitude error in this window
+            init_errors_deg = self._attitude_errors_deg_for_states(
+                states=self.states,
+                start_k=start_k,
+                q_true=q_true,
+            )
+
+            # 4) optimize current window
+            optimized_states = self.optimize()
+
+            # 5) post-optimization attitude error
+            window_errors_deg = self._attitude_errors_deg_for_states(
+                states=list(optimized_states),
+                start_k=start_k,
+                q_true=q_true,
+            )
+
+            if window_errors_deg:
+                mean_err = float(np.mean(window_errors_deg))
+                max_err = float(np.max(window_errors_deg))
+                pbar.set_postfix({
+                    "mean_err": f"{mean_err:.3f}",
+                    "max_err": f"{max_err:.3f}",
+                    "start": start_k,
+                })
+
+            # 6) store optimized states globally (except last, which is carried)
+            self._commit_window_to_global(
+                optimized_states=optimized_states,
+                start_k=start_k,
+                est_states=est_states,
+            )
+
+            # 7) carry last state as prior for next window
+            last_state = optimized_states[-1]
+            self.states = [last_state]
+            self.factors = []
+            start_k = k  # new window starts at global index k
+
+            # fresh prior on carried state
+            self.add_prior(
+                state_idx=0,
+                prior=last_state.nom,
+                cov=np.diag([1e-6, 1e-6, 1e-6, 1e-8, 1e-8, 1e-8]),
+            )
+
+        # ensure final entry is filled
+        if est_states[-1] is None:
+            est_states[-1] = self.states[0]
+
+        # type ignore: we know all entries are filled now
+        filled_states: list[EskfState] = [s for s in est_states if s is not None]  # type: ignore
+
+        est_run_id_out = db.insert_estimation_run(
             sim_run_id=sim_run_id,
             t=t,
             jd=jd,
-            states=optimized_states,
+            states=filled_states,
             name=est_name,
         )
-        return est_run_id
+        print(f"FGO estimation run stored with est_run_id={est_run_id_out}")
+        return est_run_id_out
+
+
+
+
+
+if __name__ == "__main__":
+    fg = FGO()
+    fg.run_on_simulation(
+        est_run_id=1,
+        sim_run_id=1,
+        env=OrbitEnvironmentModel(),
+        db_path="simulations.db",
+        est_name="fgo_test",
+    )

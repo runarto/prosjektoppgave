@@ -3,7 +3,7 @@ import json
 import numpy as np
 from typing import Dict
 from dataclasses import asdict
-from data.classes import SimulationConfig, SimulationResult
+from data.classes import SimulationConfig, SimulationResult, EstimationResult
 
 class SimulationDatabase:
     def __init__(self, path: str):
@@ -260,4 +260,47 @@ class SimulationDatabase:
             sun_meas=sun_meas,
             st_meas=st_meas,
             config=cfg,
+        )
+        
+    def load_estimated_states(self, est_run_id: int) -> EstimationResult:
+        """
+        Load estimated states for a given estimation run.
+
+        Args:
+            est_run_id: id in est_runs.
+        Returns:
+            list of EskfState.
+        """
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT idx, t, jd,
+                   q0, q1, q2, q3,
+                   bgx, bgy, bgz
+            FROM est_states
+            WHERE est_run_id=?
+            ORDER BY idx ASC;
+        """, (est_run_id,))
+        rows = cur.fetchall()
+
+        N = len(rows)
+        q_estimated = np.zeros((N, 4))
+        b_g_estimated = np.zeros((N, 3))
+        t = np.zeros(N)
+        jd = np.zeros(N)
+
+        for i, r in enumerate(rows):
+            (_, t_i, jd_i,
+            q0,q1,q2,q3,
+            bgx,bgy,bgz) = r
+
+            q_estimated[i] = np.array([q0, q1, q2, q3], float)
+            b_g_estimated[i] = np.array([bgx, bgy, bgz], float)
+            t[i] = t_i
+            jd[i] = jd_i
+
+        return EstimationResult(
+            t=t,
+            jd=jd,
+            q_est=q_estimated,
+            bg_est=b_g_estimated,
         )

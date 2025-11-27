@@ -261,15 +261,15 @@ class SensorStarTracker:
     def quat_error(q_nom: Quaternion, q_meas: Quaternion) -> np.ndarray[3]:
         """Map quaternion difference to small-angle error δθ.
 
-        q_err = q_meas ⊗ q_nom^{-1} ~ [1, 0.5 δθ] for small δθ.
+        For small δθ, with q_meas ≈ δq ⊗ q_nom:
+            q_err = q_meas ⊗ q_nom^{-1} ≈ [1, 0.5 δθ].
         """
         q_nom_inv = q_nom.conjugate()
-        # δq ≈ q_nom^{-1} ⊗ q_meas
-        q_err = q_nom_inv.multiply(q_meas).normalize()
+        q_err = q_meas.multiply(q_nom_inv).normalize()  # q_meas ⊗ q_nom^{-1}
 
-        w = q_err.mu
         v = q_err.eta
         return 2.0 * v
+
 
     def pred_from_est(self, x_est: EskfState, q_meas: Quaternion) -> MultiVarGauss[np.ndarray]:
         """Predict the *error* measurement for the star tracker.
