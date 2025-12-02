@@ -10,6 +10,14 @@ class Quaternion:
     def __init__(self, mu: float, eta: np.ndarray):
         self.mu = float(mu)
         self.eta = np.asarray(eta, dtype=float).reshape(3)
+        
+
+    def canonical(self):
+        """Return a copy with sign chosen so that mu >= 0."""
+        if self.mu < 0.0:
+            return Quaternion(-self.mu, -self.eta)
+        return self
+
 
     @staticmethod
     def from_array(q):

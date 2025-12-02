@@ -44,9 +44,9 @@ class AttitudeDataGenerator:
         A_x = self.config["omega_profile"]["amplitude"]["x"]
         A_y = self.config["omega_profile"]["amplitude"]["y"]
         A_z = self.config["omega_profile"]["amplitude"]["z"]
-        f_x = eval(self.config["omega_profile"]["frequency"]["x"])
-        f_y = eval(self.config["omega_profile"]["frequency"]["y"])
-        f_z = eval(self.config["omega_profile"]["frequency"]["z"])
+        f_x = self.config["omega_profile"]["frequency"]["x"]
+        f_y = self.config["omega_profile"]["frequency"]["y"]
+        f_z = self.config["omega_profile"]["frequency"]["z"]
         
         omega_x = A_x * np.sin(2 * np.pi * f_x * t)
         omega_y = A_y * np.sin(2 * np.pi * f_y * t)
@@ -55,7 +55,7 @@ class AttitudeDataGenerator:
         return np.array([omega_x, omega_y, omega_z])
 
     def run(self, cfg: SimulationConfig) -> None:
-        T, dt = self.config["simulation"]["T"], self.config["simulation"]["dt"]
+        T, dt = self.config["time"]["sim_T"], self.config["time"]["sim_dt"]
         n_steps = int(np.floor(T / dt)) + 1
 
         # compute sampling divisors
@@ -83,7 +83,7 @@ class AttitudeDataGenerator:
         b_g_true = np.zeros(3)
 
         # true gyro-bias random walk std (could be moved into cfg)
-        sigma_bg_true = np.deg2rad(self.config["sensors"]["gyro"]["noise_rw"])
+        sigma_bg_true = np.deg2rad(self.config["sensors"]["gyro"]["noise"]["noise_rw"])
 
         for k in range(n_steps):
             t = t_vec[k]
@@ -108,8 +108,8 @@ class AttitudeDataGenerator:
                 b_g_true = b_g_true + w_bg
 
             # 5) Sensor measurements with individual sampling times
-
             # 5a) Gyro (at gyro.dt)
+            
             if k % gyro_div == 0:
                 omega_truth_for_sensor = omega_true + b_g_true
                 omega_meas = self.gyro.sample(omega_truth_for_sensor)
@@ -117,18 +117,30 @@ class AttitudeDataGenerator:
 
             # 5b) Magnetometer (at mag.dt)
             if k % mag_div == 0:
-                mag_meas = self.mag.sample(q_true=q_true, b_eci=B_eci)
+                mag_meas = self.mag.sample(q_true=q_true, B_n=B_eci)
+                if mag_meas is None:
+                    mag_meas = np.full(3, np.nan)
+                else:
+                    # renormalise to emulate a unit-vector measurement
+                    nrm = np.linalg.norm(mag_meas)
+                    if nrm > 1e-12:
+                        mag_meas /= nrm
+                    else:
+                        mag_meas[:] = np.nan
                 mag_meas_log[k] = mag_meas
 
             # 5c) Sun sensor (at sun.dt)
             if k % sun_div == 0:
-                sun_meas = self.sun.sample(q_true=q_true, s_eci=s_eci)
-                # renormalise to emulate a unit-vector measurement
-                nrm = np.linalg.norm(sun_meas)
-                if nrm > 1e-12:
-                    sun_meas /= nrm
+                sun_meas = self.sun.sample(q_true=q_true, s_n=s_eci)
+                if sun_meas is None:
+                    sun_meas = np.full(3, np.nan)
                 else:
-                    sun_meas[:] = np.nan
+                    # renormalise to emulate a unit-vector measurement
+                    nrm = np.linalg.norm(sun_meas)
+                    if nrm > 1e-12:
+                        sun_meas /= nrm
+                    else:
+                        sun_meas[:] = np.nan
                 sun_meas_log[k] = sun_meas
 
             # 5d) Star tracker (at star_trk.dt)
@@ -136,6 +148,8 @@ class AttitudeDataGenerator:
                 q_st_meas = self.star_trk.sample(q_true=q_true)
                 if q_st_meas is not None:
                     st_meas_log[k] = q_st_meas.as_array()
+                else:
+                    st_meas_log[k] = np.full(4, np.nan)
 
             # 6) log truth
             q_true_log[k] = q_true.as_array()
@@ -178,13 +192,13 @@ if __name__ == "__main__":
     )
     
     sim_cfg = SimulationConfig(
-        T=config["simulation"]["T"],
-        dt=config["simulation"]["dt"],
-        start_jd=config["simulation"]["start_jd"],
+        T=config["time"]["sim_T"],
+        dt=config["time"]["sim_dt"],
+        start_jd=config["time"]["start_jd"],
         run_name=config["simulation"]["run_name"],
-        gyro_noise_scale=config["simulation"]["gyro_noise_scale"],
-        mag_noise_scale=config["simulation"]["mag_noise_scale"],
-        sun_noise_scale=config["simulation"]["sun_noise_scale"],
+        gyro_noise_scale=1.0,
+        mag_noise_scale=1.0,
+        sun_noise_scale=1.0,
     )
     
     attitudeDataGenerator.run(cfg=sim_cfg)

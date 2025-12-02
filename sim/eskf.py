@@ -15,7 +15,6 @@ logger = get_logger(__name__)
 
 @dataclass
 class ESKF:
-    Q: np.ndarray               # process noise covariance for error state
     P0: np.ndarray              # initial error covariance
 
     def __post_init__(self):
@@ -31,18 +30,21 @@ class ESKF:
         # 1) propagate nominal attitude (you already do this)
         quat = x_est.nom.ori.propagate(omega_meas - x_est.nom.gyro_bias, dt)
         x_est.nom.ori = quat
+        x_est.nom.gyro_bias = x_est.nom.gyro_bias  # stays the same
 
         # 2) propagate covariance for 6D error state
+            
         P = x_est.err.cov
         P_pred = self.process.propagate_covariance(P, x_est.nom, omega_meas, dt)
         x_est.err.cov = P_pred
         x_est.err.mean[:] = 0.0  # stays zero in ESKF
         
-        logging_msg = (f"Predicted to t+{dt:.3f}s: "
-                       f"q = {x_est.nom.ori}, "
-                       f"b_g = {x_est.nom.gyro_bias}, "
-                       f"P = {x_est.err.cov}")
-        logger.debug(logging_msg)
+        if not np.isfinite(P_pred).all():
+            raise ValueError("Non-finite P_pred produced in predict")
+
+        if not np.isfinite(x_est.nom.gyro_bias).all():
+            raise ValueError("Non-finite gyro_bias produced in predict")
+
 
         return x_est
 

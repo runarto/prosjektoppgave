@@ -4,6 +4,10 @@ import numpy as np
 from typing import Dict
 from dataclasses import asdict
 from data.classes import SimulationConfig, SimulationResult, EstimationResult
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class SimulationDatabase:
     def __init__(self, path: str):
@@ -57,6 +61,7 @@ class SimulationDatabase:
         """)
 
         # --- NEW: estimation states ---
+        # --- NEW: estimation states ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS est_states (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,9 +73,18 @@ class SimulationDatabase:
             q0 REAL, q1 REAL, q2 REAL, q3 REAL,
             bgx REAL, bgy REAL, bgz REAL,
 
+            -- 6x6 covariance, row-major flattened: P[row][col] -> P_rc
+            P00 REAL, P01 REAL, P02 REAL, P03 REAL, P04 REAL, P05 REAL,
+            P10 REAL, P11 REAL, P12 REAL, P13 REAL, P14 REAL, P15 REAL,
+            P20 REAL, P21 REAL, P22 REAL, P23 REAL, P24 REAL, P25 REAL,
+            P30 REAL, P31 REAL, P32 REAL, P33 REAL, P34 REAL, P35 REAL,
+            P40 REAL, P41 REAL, P42 REAL, P43 REAL, P44 REAL, P45 REAL,
+            P50 REAL, P51 REAL, P52 REAL, P53 REAL, P54 REAL, P55 REAL,
+
             FOREIGN KEY(est_run_id) REFERENCES est_runs(id)
         );
         """)
+
         cur.execute("CREATE INDEX IF NOT EXISTS idx_est_states_run ON est_states(est_run_id, idx);")
 
         self.conn.commit()
@@ -170,6 +184,10 @@ class SimulationDatabase:
             q = x_est.nom.ori.as_array()
             bg = np.asarray(x_est.nom.gyro_bias, float).reshape(3)
 
+            # 6x6 covariance -> flattened row-major length-36
+            P = x_est.err.cov
+            P_flat = P.reshape(36)
+
             rows.append((
                 est_run_id,
                 k,
@@ -177,16 +195,31 @@ class SimulationDatabase:
                 float(jd[k]),
                 float(q[0]), float(q[1]), float(q[2]), float(q[3]),
                 float(bg[0]), float(bg[1]), float(bg[2]),
+                *[float(v) for v in P_flat],
             ))
 
         cur.executemany("""
             INSERT INTO est_states (
                 est_run_id, idx, t, jd,
                 q0, q1, q2, q3,
-                bgx, bgy, bgz
-            ) VALUES (?, ?, ?, ?,
-                      ?, ?, ?, ?,
-                      ?, ?, ?);
+                bgx, bgy, bgz,
+                P00, P01, P02, P03, P04, P05,
+                P10, P11, P12, P13, P14, P15,
+                P20, P21, P22, P23, P24, P25,
+                P30, P31, P32, P33, P34, P35,
+                P40, P41, P42, P43, P44, P45,
+                P50, P51, P52, P53, P54, P55
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?
+            );
         """, rows)
 
         self.conn.commit()
@@ -269,13 +302,19 @@ class SimulationDatabase:
         Args:
             est_run_id: id in est_runs.
         Returns:
-            list of EskfState.
+            EstimationResult with (t, jd, q_est, bg_est, P_est).
         """
         cur = self.conn.cursor()
         cur.execute("""
             SELECT idx, t, jd,
                    q0, q1, q2, q3,
-                   bgx, bgy, bgz
+                   bgx, bgy, bgz,
+                   P00, P01, P02, P03, P04, P05,
+                   P10, P11, P12, P13, P14, P15,
+                   P20, P21, P22, P23, P24, P25,
+                   P30, P31, P32, P33, P34, P35,
+                   P40, P41, P42, P43, P44, P45,
+                   P50, P51, P52, P53, P54, P55
             FROM est_states
             WHERE est_run_id=?
             ORDER BY idx ASC;
@@ -285,22 +324,27 @@ class SimulationDatabase:
         N = len(rows)
         q_estimated = np.zeros((N, 4))
         b_g_estimated = np.zeros((N, 3))
+        P_estimated = np.zeros((N, 6, 6))
         t = np.zeros(N)
         jd = np.zeros(N)
 
         for i, r in enumerate(rows):
             (_, t_i, jd_i,
-            q0,q1,q2,q3,
-            bgx,bgy,bgz) = r
+            q0, q1, q2, q3,
+            bgx, bgy, bgz, *P_flat) = r
 
-            q_estimated[i] = np.array([q0, q1, q2, q3], float)
-            b_g_estimated[i] = np.array([bgx, bgy, bgz], float)
             t[i] = t_i
             jd[i] = jd_i
+            q_estimated[i] = [q0, q1, q2, q3]
+            b_g_estimated[i] = [bgx, bgy, bgz]
+            P_estimated[i] = np.array(P_flat, float).reshape(6, 6)
+
+
 
         return EstimationResult(
             t=t,
             jd=jd,
             q_est=q_estimated,
             bg_est=b_g_estimated,
+            P_est=P_estimated,
         )

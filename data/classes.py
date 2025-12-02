@@ -1,6 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import dataclass
 import numpy as np
 
 @dataclass
@@ -41,4 +40,7 @@ class EstimationResult:
     jd: np.ndarray         # (N,)
     q_est: np.ndarray      # (N, 4)
     bg_est: np.ndarray     # (N, 3)
+    P_est: np.ndarray      # (N, 6, 6)
+    
      
+
