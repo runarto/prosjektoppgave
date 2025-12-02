@@ -12,6 +12,7 @@ from utilities.gaussian import MultiVarGauss
 from utilities.process_model import ProcessModel
 from utilities.quaternion import Quaternion
 from utilities.sensors import SensorMagnetometer, SensorSunVector, SensorStarTracker
+from utilities.utils import get_skew_matrix
 from utilities.states import EskfState, NominalState
 
 
@@ -90,11 +91,33 @@ class GtsamFGO:
             att_err = gtsam.Rot3.Logmap(pred_rot_j.between(rot_j))
             bias_err = bias_j - bias_i
 
-            if jacobians is not None:
-                # Jacobians are omitted for simplicity; GTSAM will numerical differentiate.
-                pass
+            err = np.hstack([att_err, bias_err])
 
-            return np.hstack([att_err, bias_err])
+            if jacobians is not None:
+                def err_wrt_rot_i(r: gtsam.Rot3) -> np.ndarray:
+                    omega_hat = np.asarray(omega_meas, float).reshape(3) - bias_i
+                    pred = r.compose(gtsam.Rot3.Expmap(omega_hat * dt))
+                    att = gtsam.Rot3.Logmap(pred.between(rot_j))
+                    return np.hstack([att, bias_j - bias_i])
+
+                def err_wrt_bias_i(bias: np.ndarray) -> np.ndarray:
+                    omega_hat = np.asarray(omega_meas, float).reshape(3) - bias.reshape(3)
+                    pred = rot_i.compose(gtsam.Rot3.Expmap(omega_hat * dt))
+                    att = gtsam.Rot3.Logmap(pred.between(rot_j))
+                    return np.hstack([att, bias_j - bias.reshape(3)])
+
+                def err_wrt_rot_j(r: gtsam.Rot3) -> np.ndarray:
+                    att = gtsam.Rot3.Logmap(rot_i.compose(gtsam.Rot3.Expmap(omega_hat * dt)).between(r))
+                    return np.hstack([att, bias_j - bias_i])
+
+                jacobians[0][:] = gtsam.numericalDerivative11(err_wrt_rot_i, rot_i, 1e-5)
+                jacobians[1][:] = gtsam.numericalDerivative11(
+                    err_wrt_bias_i, bias_i.reshape(3), 1e-5
+                )
+                jacobians[2][:] = gtsam.numericalDerivative11(err_wrt_rot_j, rot_j, 1e-5)
+                jacobians[3][:] = np.vstack([np.zeros((3, 3)), np.eye(3)])
+
+            return err
 
         return gtsam.CustomFactor(noise, keys, error_fn)
 
@@ -116,7 +139,13 @@ class GtsamFGO:
             rot = values.atRot3(rot_key)
             R_bn = rot.matrix().T
             z_pred = R_bn @ B_n.reshape(3)
-            return y.reshape(3) - z_pred
+            err = y.reshape(3) - z_pred
+
+            if jacobians is not None:
+                jac = -get_skew_matrix(z_pred)
+                jacobians[0][:] = jac
+
+            return err
 
         graph.add(gtsam.CustomFactor(noise, [rot_key], error_fn))
 
@@ -133,7 +162,13 @@ class GtsamFGO:
             rot = values.atRot3(rot_key)
             R_bn = rot.matrix().T
             z_pred = R_bn @ s_n.reshape(3)
-            return y.reshape(3) - z_pred
+            err = y.reshape(3) - z_pred
+
+            if jacobians is not None:
+                jac = -get_skew_matrix(z_pred)
+                jacobians[0][:] = jac
+
+            return err
 
         graph.add(gtsam.CustomFactor(noise, [rot_key], error_fn))
 
@@ -148,7 +183,12 @@ class GtsamFGO:
 
         def error_fn(this: gtsam.CustomFactor, values: gtsam.Values, jacobians=None):
             rot = values.atRot3(rot_key)
-            return gtsam.Rot3.Logmap(rot_meas.between(rot))
+            err = gtsam.Rot3.Logmap(rot_meas.between(rot))
+
+            if jacobians is not None:
+                jacobians[0][:] = np.eye(3)
+
+            return err
 
         graph.add(gtsam.CustomFactor(noise, [rot_key], error_fn))
 
