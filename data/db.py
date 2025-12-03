@@ -61,7 +61,6 @@ class SimulationDatabase:
         """)
 
         # --- NEW: estimation states ---
-        # --- NEW: estimation states ---
         cur.execute("""
         CREATE TABLE IF NOT EXISTS est_states (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,7 +146,7 @@ class SimulationDatabase:
         self.conn.commit()
         return run_id
     
-    def insert_estimation_run(self,
+    def insert_eskf_run(self,
                               sim_run_id: int,
                               t: np.ndarray,
                               jd: np.ndarray,
@@ -222,6 +221,75 @@ class SimulationDatabase:
             );
         """, rows)
 
+        self.conn.commit()
+        return est_run_id
+    
+    def insert_fgo_run(self,
+                              sim_run_id: int,
+                              t: np.ndarray,
+                              jd: np.ndarray,
+                              states: list,
+                              name: str = "fgo") -> int:
+        """
+        Store FGO results for one simulation run.
+        Args:
+            sim_run_id:  id in 'runs' table this estimation corresponds to
+            t, jd:       time vectors (same length as states)
+            states:      list of NominalState
+            name:        label for this estimation run (e.g. 'fgo_baseline')
+        Returns:
+            est_run_id: primary key in est_runs.
+        """
+        
+        cur = self.conn.cursor()    
+        # 1) create est_run row
+        cur.execute(
+            "INSERT INTO est_runs (sim_run_id, name) VALUES (?, ?);",
+            (sim_run_id, name)
+        )
+        est_run_id = cur.lastrowid
+        # 2) bulk insert est_states
+        N = len(states)
+        assert N == len(t) == len(jd)
+        rows = []
+        for k in range(N):
+            x_est = states[k]
+            q = x_est.ori.as_array()
+            bg = np.asarray(x_est.gyro_bias, float).reshape(3)
+            # For FGO, we do not have covariance information; insert zeros
+            P_flat = np.zeros(36, float)
+            rows.append((
+                est_run_id,
+                k,
+                float(t[k]),
+                float(jd[k]),
+                float(q[0]), float(q[1]), float(q[2]), float(q[3]),
+                float(bg[0]), float(bg[1]), float(bg[2]),
+                *[float(v) for v in P_flat],
+            ))
+        cur.executemany("""
+            INSERT INTO est_states (
+                est_run_id, idx, t, jd,
+                q0, q1, q2, q3,
+                bgx, bgy, bgz,
+                P00, P01, P02, P03, P04, P05,
+                P10, P11, P12, P13, P14, P15,
+                P20, P21, P22, P23, P24, P25,
+                P30, P31, P32, P33, P34, P35,
+                P40, P41, P42, P43, P44, P45,
+                P50, P51, P52, P53, P54, P55
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?
+            );
+        """, rows)  
         self.conn.commit()
         return est_run_id
 

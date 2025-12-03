@@ -4,7 +4,7 @@
       "name": "Python Debugger: Current File",
       "type": "debugpy",
       "request": "launch",
-      "module": "sim.run_hybrid",
+      "module": "sim.run_fg",
       "console": "internalConsole",
       "cwd": "${workspaceFolder}"
     }

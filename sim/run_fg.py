@@ -1,149 +1,128 @@
-from sim.fg import FGO
-from environment.environment import OrbitEnvironmentModel
 from data.db import SimulationDatabase
-from logging_config import get_logger
-from tqdm import tqdm
+from sim.gtsam_fg import GtsamFGO, WindowSample, SlidingWindow
+from utilities.states import EskfState, NominalState
+from utilities.quaternion import Quaternion
+from environment.environment import OrbitEnvironmentModel
+from utilities.gaussian import MultiVarGauss
+from sim.temp import error_angle_deg
+
 import numpy as np
 
-logger = get_logger(__name__)
-
-
-class FGO_runner:
+def run_on_simulation(db: SimulationDatabase, sim_run_id: int, est_name: str = "gtsam_fgo") -> int:
+    # ----- load data -----
     
-    def __init__(self, env: OrbitEnvironmentModel, fgo: FGO, db_path: str = "simulations.db"):
-        self.env = env
-        self.fgo = fgo
-        self.db = SimulationDatabase(db_path)
-    
-    
-    def run_on_simulation(
-        self,
-        est_run_id: int,
-        sim_run_id: int,
-        env: OrbitEnvironmentModel,
-        db_path: str = "simulations.db",
-        est_name: str = "fgo",
-    ) -> int:
-        """Sliding-window factor graph on stored simulation."""
+    window = SlidingWindow(max_len=300)
+    fgo = GtsamFGO()
+    env = OrbitEnvironmentModel()
+    sim = db.load_run(sim_run_id)
+    t = sim.t
+    jd = sim.jd
+    omega_meas_log = sim.omega_meas
+    mag_meas_log   = sim.mag_meas
+    sun_meas_log   = sim.sun_meas
+    st_meas_log    = sim.st_meas
 
-        db = SimulationDatabase(db_path)
-        result = db.load_run(sim_run_id)
-        estimates = db.load_estimated_states(est_run_id)
+    N = t.shape[0]
 
-        t = result.t
-        jd = result.jd
-        omega_meas_log = result.omega_meas
-        mag_meas_log = result.mag_meas
-        sun_meas_log = result.sun_meas
-        st_meas_log = result.st_meas
-        q_estimated = estimates.q_est
-        q_true = result.q_true
+    # global output
+    est_states: list[NominalState] = []
 
-        N = t.shape[0]
-        window_size = 200  # tune for memory/speed
+    # initial nominal (could also take true or KF)
+    q0 = Quaternion.from_array(sim.q_true[0])
+    b0 = np.zeros(3)
+    x_nom_prev = NominalState(ori=q0, gyro_bias=b0)
 
-        # full estimated trajectory storage
-        est_states: list[EskfState | None] = [None] * N
+    # loop over all time steps
+    for k in range(N):
+        if k == 0:
+            dt = 0.02
+        else:
+            dt = t[k] - t[k-1]
 
-        # ----- initialize with first state from ESKF -----
-        x0 = self.fgo._make_initial_state(q_estimated[0])
+        omega_k = omega_meas_log[k]
+        if np.any(np.isnan(omega_k)):
+            omega_k = omega_meas_log[k-1]
 
-        self.states = []
-        self.factors = []
-        idx0 = self.fgo.add_state(x0)
-        assert idx0 == 0
+        # simple nominal propagation using gyro only
+        q_pred = x_nom_prev.ori.propagate(omega_k - x_nom_prev.gyro_bias, dt)
+        x_nom = NominalState(ori=q_pred, gyro_bias=x_nom_prev.gyro_bias)
 
-        # prior on first state
-        self.fgo.add_prior(
-            state_idx=0,
-            prior=x0.nom,
-            cov=np.diag([1e-4, 1e-4, 1e-4, 1e-6, 1e-6, 1e-6]),
+        # build WindowSample for this step
+        z_mag = None if np.any(np.isnan(mag_meas_log[k])) else mag_meas_log[k]
+        z_sun = None if np.any(np.isnan(sun_meas_log[k])) else sun_meas_log[k]
+        z_st  = None
+        if not np.any(np.isnan(st_meas_log[k])):
+            z_st = Quaternion.from_array(st_meas_log[k])
+
+        sample = WindowSample(
+            t=float(t[k]),
+            jd=float(jd[k]),
+            x_nom=x_nom,
+            omega_meas=omega_k,
+            z_mag=z_mag,
+            z_sun=z_sun,
+            z_st=z_st,
         )
 
-        start_k = 0  # global index of self.states[0]
+        window.add(sample)
+        x_nom_prev = x_nom  # for next step
 
-        pbar = tqdm(range(1, N), desc="FGO Sliding Window", unit="step")
-        for k in pbar:
-            # 1) extend graph with new time step
-            self.fgo._add_step_state_and_factors(
-                k=k,
-                t=t,
-                jd=jd,
-                q_estimated=q_estimated,
-                omega_meas_log=omega_meas_log,
-                mag_meas_log=mag_meas_log,
-                sun_meas_log=sun_meas_log,
-                st_meas_log=st_meas_log,
-                env=env,
+        # when window is full, run smoothing
+        if window.ready:
+
+            window_samples = list(window.samples)
+            window_states = fgo.optimize_window(window_samples, env)
+            
+            # Compare error to the true state within the window
+            for i, sm_state in enumerate(window_states):
+                global_k = k - len(window_states) + 1 + i
+                q_true = Quaternion.from_array(sim.q_true[global_k])
+                err_angle = error_angle_deg(q_true, sm_state.ori)
+                print(f"  Step {global_k}/{N-1}: attitude error = {err_angle:.3f} deg")
+                est_states.append(sm_state)
+                print(f"  Stored estimated states: {len(est_states)}")
+            est_states.pop()
+
+            # keep the last smoothed sample as the nominal for next iteration
+            last_smoothed = window_states[-1]
+            x_nom_prev = last_smoothed
+
+            # rebuild the window with the *times* but updated nominal state at the end
+            # simplest: keep the last sample and clear the rest
+            last_sample = window_samples[-1]
+            window.samples.clear()
+            window.add(
+                WindowSample(
+                    t=last_sample.t,
+                    jd=last_sample.jd,
+                    x_nom=x_nom_prev,
+                    omega_meas=last_sample.omega_meas,
+                    z_mag=last_sample.z_mag,
+                    z_sun=last_sample.z_sun,
+                    z_st=last_sample.z_st,
+                )
             )
+            
+            print(f"Estimated states stored so far: {len(est_states)}")
+            
 
-            # 2) check window condition
-            window_full = len(self.states) >= window_size
-            last_step = (k == N - 1)
-
-            if not (window_full or last_step):
-                continue
-
-            # 3) pre-optimization attitude error in this window
-            init_errors_deg = self.fgo._attitude_errors_deg_for_states(
-                states=self.states,
-                start_k=start_k,
-                q_true=q_true,
-            )
-
-            # 4) optimize current window
-            optimized_states = self.fgo.optimize()
-
-            # 5) post-optimization attitude error
-            window_errors_deg = self.fgo._attitude_errors_deg_for_states(
-                states=list(optimized_states),
-                start_k=start_k,
-                q_true=q_true,
-            )
-
-            if window_errors_deg:
-                mean_err = float(np.mean(window_errors_deg))
-                max_err = float(np.max(window_errors_deg))
-                pbar.set_postfix({
-                    "mean_err": f"{mean_err:.3f}",
-                    "max_err": f"{max_err:.3f}",
-                    "start": start_k,
-                })
-
-            # 6) store optimized states globally (except last, which is carried)
-            self.fgo._commit_window_to_global(
-                optimized_states=optimized_states,
-                start_k=start_k,
-                est_states=est_states,
-            )
-
-            # 7) carry last state as prior for next window
-            last_state = optimized_states[-1]
-            self.states = [last_state]
-            self.factors = []
-            start_k = k  # new window starts at global index k
-
-            # fresh prior on carried state
-            self.fgo.add_prior(
-                state_idx=0,
-                prior=last_state.nom,
-                cov=np.diag([1e-6, 1e-6, 1e-6, 1e-8, 1e-8, 1e-8]),
-            )
-
-        # ensure final entry is filled
-        if est_states[-1] is None:
-            est_states[-1] = self.states[0]
-
-        # type ignore: we know all entries are filled now
-        filled_states: list[EskfState] = [s for s in est_states if s is not None]  # type: ignore
-
-        est_run_id_out = db.insert_estimation_run(
-            sim_run_id=sim_run_id,
-            t=t,
-            jd=jd,
-            states=filled_states,
-            name=est_name,
+    # handle the very last state (if not already added)
+    if len(est_states) < N:
+        # last nominal comes from x_nom_prev
+        err = MultiVarGauss(mean=np.zeros(6), cov=fgo.process.Q_c.copy())
+        est_states.append(EskfState(nom=x_nom_prev, err=err))
+        
+    q_estimated = [state.nom.ori for state in est_states]
+    q_true = [sim.q_true[k] for k in range(len(est_states))]
+    for k in range(len(est_states)):
+        err_angle = error_angle_deg(
+            Quaternion.from_array(q_true[k]),
+            q_estimated[k],
         )
-        print(f"FGO estimation run stored with est_run_id={est_run_id_out}")
-        return est_run_id_out
-    
+        print(f"Step {k}/{N-1}: attitude error = {err_angle:.3f} deg")
+
+
+db = SimulationDatabase("simulations.db")
+sim_run_id = 1  # change as needed
+est_run_id = run_on_simulation(db, sim_run_id, est_name="gtsam_fgo")
+print(f"Estimation run stored with ID {est_run_id}")

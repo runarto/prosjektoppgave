@@ -26,10 +26,12 @@ class ProcessModel:
         n_g   ~ N(0, σ_g^2 I_3)
         w_bg  ~ N(0, σ_bg^2 I_3)
 
-    Standard discrete-time approximation (small Δt):
+    Standard second and third-order discrete-time approximation (small Δt):
 
-        F ≈ I + A Δt
-        Q_d ≈ Q_c Δt
+        F ≈ I + A Δt + 0.5 A² Δt²
+        Q_d = exp(F) G Q_c Gᵀ ≈ Q_c Δt
+              + 0.5 (A Q_c + Q_c Aᵀ) Δt²
+              + 1/3 A Q_c Aᵀ Δt³
         G = I
 
     Covariance prediction:

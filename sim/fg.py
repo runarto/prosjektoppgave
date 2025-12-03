@@ -41,6 +41,10 @@ class FGO:
         self.factors: List[Factor] = []
 
     # -------------------- GRAPH BUILDING --------------------
+    
+    def set_window_size(self, size: int) -> None:
+        """Set the maximum number of states in the sliding window."""
+        self.window_size = size
 
     def add_state(self, state: EskfState) -> int:
         """Add a new state to the graph and return its index."""
@@ -206,20 +210,37 @@ class FGO:
 
         match sensor_type:
             case SensorType.MAGNETOMETER:
-                assert B_n is not None, "B_n must be provided for magnetometer factors"
-                z_pred = self.sens_mag.pred_from_est(x_est, B_n).mean.reshape(-1)
-                innovation = np.asarray(y, float).reshape(-1) - z_pred
+                assert B_n is not None, "B_n must be provided for magnetometer update"
+
+                # predicted measurement z_pred ~ N(mean, S)
+                z_pred_gauss = self.sens_mag.pred_from_est(x_est, B_n)
+                z_pred = z_pred_gauss.mean.reshape(-1)
+
+                y_vec = np.asarray(y, float).reshape(-1)
+                innovation = y_vec - z_pred
+
                 H = self.sens_mag.H(x_est.nom, B_n)
                 R = self.sens_mag.R
+
             case SensorType.SUN_VECTOR:
-                assert s_n is not None, "s_n must be provided for sun-vector factors"
-                z_pred = self.sens_sv.pred_from_est(x_est, s_n).mean.reshape(-1)
-                innovation = np.asarray(y, float).reshape(-1) - z_pred
+                assert s_n is not None, "s_n must be provided for sun-vector update"
+
+                z_pred_gauss = self.sens_sv.pred_from_est(x_est, s_n)
+                z_pred = z_pred_gauss.mean.reshape(-1)
+
+                y_vec = np.asarray(y, float).reshape(-1)
+                innovation = y_vec - z_pred
+
                 H = self.sens_sv.H(x_est.nom, s_n)
                 R = self.sens_sv.R
+
             case SensorType.STAR_TRACKER:
+                # y is a Quaternion measurement
                 assert isinstance(y, Quaternion)
+
+                # measurement space is small-angle error δθ, predicted mean = 0
                 innovation = self.sens_st.innovation(x_est=x_est, q_meas=y).reshape(-1)
+
                 H = self.sens_st.H(x_est.nom)
                 R = self.sens_st.R
             case _:
@@ -229,7 +250,6 @@ class FGO:
         residual = sqrt_info @ innovation
 
         J = np.zeros((H.shape[0], total_dim))
-        # Note the minus sign here
         J[:, 6 * state_idx:6 * (state_idx + 1)] = -sqrt_info @ H
         return residual, J
 
@@ -263,7 +283,8 @@ class FGO:
             q0 = Quaternion.from_array(np.array([1.0, 0.0, 0.0, 0.0]))
             b0 = np.zeros(3)
 
-        err0 = MultiVarGauss(mean=np.zeros(6), cov=self.process.Q_c)
+        P0 = np.diag([1e-1, 1e-1, 1e-1, 1e-4, 1e-4, 1e-4])
+        err0 = MultiVarGauss(mean=np.zeros(6), cov=P0)
         return EskfState(nom=NominalState(ori=q0, gyro_bias=b0), err=err0)
 
     def iterate(
@@ -320,14 +341,14 @@ class FGO:
                 s_n=s_eci,
             )
 
-        # Star tracker factor
-        if not np.any(np.isnan(st_meas)):
-            q_meas = Quaternion.from_array(st_meas)
-            self.add_measurement(
-                idx=idx,
-                y=q_meas,
-                sensor_type=SensorType.STAR_TRACKER,
-            )
+        # # Star tracker factor
+        # if not np.any(np.isnan(st_meas)):
+        #     q_meas = Quaternion.from_array(st_meas)
+        #     self.add_measurement(
+        #         idx=idx,
+        #         y=q_meas,
+        #         sensor_type=SensorType.STAR_TRACKER,
+        #     )
 
         return len(self.states)
 

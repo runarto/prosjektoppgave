@@ -140,7 +140,8 @@ class Quaternion:
     def propagate(self, omega: np.ndarray, dt: float):
         """
         Propagate quaternion given the angular velocity over time dt,
-        using the expoential map.
+        using the expoential map. Uses left-multiplication convention.
+        I.e. q_new = delta_q ⊗ q_old, where delta_q is built from omega*dt.
         omega : angular velocity vector (3,)
         dt    : time step (float)
         """

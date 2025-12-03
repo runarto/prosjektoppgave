@@ -8,18 +8,12 @@ from utilities.utils import load_yaml
 
 
 class AttitudeDataGenerator:
-    def __init__(self,
-                 env: OrbitEnvironmentModel,
-                 gyro: SensorGyro,
-                 mag: SensorMagnetometer,
-                 sun: SensorSunVector,
-                 star_trk: SensorStarTracker,
-                 db_path: str = "simulations.db"):
-        self.env = env
-        self.gyro = gyro
-        self.mag = mag
-        self.sun = sun
-        self.star_trk = star_trk
+    def __init__(self, db_path: str = "simulations.db"):
+        self.env = OrbitEnvironmentModel()
+        self.gyro = SensorGyro()
+        self.mag = SensorMagnetometer()
+        self.sun = SensorSunVector()
+        self.star_trk = SensorStarTracker()
         self.db = SimulationDatabase(db_path)
         self.config = load_yaml("config.yaml")
 
@@ -82,7 +76,7 @@ class AttitudeDataGenerator:
         q_true = Quaternion(1.0, np.zeros(3))
         b_g_true = np.zeros(3)
 
-        # true gyro-bias random walk std (could be moved into cfg)
+        # true gyro-bias random walk std
         sigma_bg_true = np.deg2rad(self.config["sensors"]["gyro"]["noise"]["noise_rw"])
 
         for k in range(n_steps):
@@ -178,18 +172,7 @@ class AttitudeDataGenerator:
     
 if __name__ == "__main__":
     config = load_yaml("config.yaml")
-    env = OrbitEnvironmentModel()
-    gyro = SensorGyro()
-    mag = SensorMagnetometer()
-    sun = SensorSunVector()
-    star_trk = SensorStarTracker()
-    attitudeDataGenerator = AttitudeDataGenerator(
-        env=env,
-        gyro=gyro,
-        mag=mag,
-        sun=sun,
-        star_trk=star_trk
-    )
+    attitudeDataGenerator = AttitudeDataGenerator()
     
     sim_cfg = SimulationConfig(
         T=config["time"]["sim_T"],

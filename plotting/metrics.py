@@ -271,7 +271,7 @@ if __name__ == "__main__":
     metrics = Metrics(db_path="simulations.db")
 
     sim_run_id = 1
-    est_run_id = 3  # example
+    est_run_id = 1  # example
 
     # NEES / ANEES
     metrics.plot_nees(sim_run_id, est_run_id)
