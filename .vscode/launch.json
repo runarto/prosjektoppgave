@@ -4,7 +4,14 @@
       "name": "Python Debugger: Current File",
       "type": "debugpy",
       "request": "launch",
-      "module": "sim.run_fg",
+      "program": "${file}",
+      "console": "internalConsole"
+    },
+    {
+      "name": "Python Debugger: tests.test_hybrid_estimator",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "tests.test_hybrid_estimator",
       "console": "internalConsole",
       "cwd": "${workspaceFolder}"
     }

@@ -31,6 +31,10 @@ class SimulationResult:
     sun_meas: np.ndarray     # shape (N, 3)
     st_meas: np.ndarray      # shape (N, 4), NaN rows when no measurement
 
+    # environment vectors in ECI frame
+    b_eci: np.ndarray        # shape (N, 3), magnetic field in ECI
+    s_eci: np.ndarray        # shape (N, 3), sun direction in ECI
+
     # for bookkeeping
     config: SimulationConfig
     

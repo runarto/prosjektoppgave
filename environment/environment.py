@@ -26,7 +26,8 @@ class EnvironmentModel:
         
         B_ned = np.array([N, E, D]) 
         B_ecef = ned2ecef(B_ned, lat, lon)
-        return ecef2eci(B_ecef, theta_gst=theta_gst)
+        B_eci = ecef2eci(B_ecef, theta_gst=theta_gst)
+        return B_eci / np.linalg.norm(B_eci)
 
     def get_sun_eci(self, jd: float) -> np.ndarray:
         t = self.ts.tdb(jd=jd)

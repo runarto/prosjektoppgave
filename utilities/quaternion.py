@@ -12,17 +12,16 @@ class Quaternion:
         self.eta = np.asarray(eta, dtype=float).reshape(3)
         
 
-    def canonical(self):
+    def _canonical(self):
         """Return a copy with sign chosen so that mu >= 0."""
         if self.mu < 0.0:
-            return Quaternion(-self.mu, -self.eta)
-        return self
-
+            return Quaternion(-self.mu, -self.eta).normalize()
+        return Quaternion(self.mu, self.eta).normalize()
 
     @staticmethod
     def from_array(q):
         q = np.asarray(q, float).reshape(4)
-        return Quaternion(q[0], q[1:4])
+        return Quaternion(q[0], q[1:4])._canonical()
 
     def as_array(self):
         return np.concatenate(([self.mu], self.eta))
@@ -39,14 +38,13 @@ class Quaternion:
 
     @staticmethod
     def normalized(q, eps: float = 1e-12):
-        q = q.copy()
         return q.normalize(eps)
 
     def copy(self):
-        return Quaternion(self.mu, self.eta.copy())
+        return Quaternion(self.mu, self.eta)._canonical()
 
     def conjugate(self):
-        return Quaternion(self.mu, -self.eta)
+        return Quaternion(self.mu, -self.eta)._canonical()
 
     def multiply(self, q2):
         """
@@ -59,7 +57,7 @@ class Quaternion:
 
         w = w1*w2 - v1.dot(v2)
         v = w1*v2 + w2*v1 + np.cross(v1, v2)
-        return Quaternion(w, v)
+        return Quaternion(w, v)._canonical()
 
     # optional: rotate a vector
     def rotate(self, v):
@@ -70,6 +68,7 @@ class Quaternion:
     def as_rotmat(self):
         """
         Convert quaternion to rotation matrix.
+        Gives the rotation matrix from a the body frame to the navigation frame.
         """
         mu = self.mu
         x, y, z = self.eta
@@ -134,7 +133,7 @@ class Quaternion:
             return Quaternion(1.0, np.zeros(3))
         axis = avec / angle
         half = 0.5 * angle
-        return Quaternion(np.cos(half), axis * np.sin(half))
+        return Quaternion(np.cos(half), axis * np.sin(half))._canonical()
 
     
     def propagate(self, omega: np.ndarray, dt: float):
@@ -154,4 +153,4 @@ class Quaternion:
             axis = omega / norm_omega
             delta_q = Quaternion(np.cos(theta/2.0), axis * np.sin(theta/2.0))
         q_new = delta_q.multiply(self)
-        return q_new.normalize()
+        return q_new._canonical()

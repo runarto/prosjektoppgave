@@ -116,7 +116,7 @@ class EskfState:
 
         # 1) Update nominal orientation: q_new = δq ⊗ q_nom
         delta_q = Quaternion.from_avec(avec=delta_avec)
-        self.nom.ori = self.nom.ori.multiply(delta_q).normalize()
+        self.nom.ori = delta_q.multiply(self.nom.ori)
 
         # 2) Update nominal gyro bias (additive)
         self.nom.gyro_bias += delta_gyro_bias

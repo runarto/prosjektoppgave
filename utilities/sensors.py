@@ -12,8 +12,8 @@ logger = get_logger(__name__)
 @dataclass
 class SensorGyro:
     
-    def __init__(self):
-        config = load_yaml("config.yaml")
+    def __init__(self, config_path: str = "config.yaml"):
+        config = load_yaml(config_path)
         self.dt = config["sensors"]["gyro"]["dt"]
         ARW_deg = config["sensors"]["gyro"]["noise"]["arw_deg"]  # e.g. 0.15 deg / sqrt(h)
 
@@ -27,33 +27,17 @@ class SensorGyro:
         """Sample a gyro measurement from the nominal state."""
         noise = np.random.normal(0.0, self.gyro_std, size=3)
         return omega_true + noise
-
-
 class SensorMagnetometer:
-    def __init__(self):
-        config = load_yaml("config.yaml")
+    def __init__(self, config_path: str = "config.yaml"):
+        config = load_yaml(config_path)
         mag_cfg = config["sensors"]["mag"]
 
         self.mag_std: float = mag_cfg["mag_std"]
         self.dt: float = mag_cfg["dt"]
 
-        # Bias random walk parameters
-        self.bias_rw_std: float = mag_cfg.get("bias_rw_std", 0.0)
-        self.bias: np.ndarray = np.asarray(
-            mag_cfg.get("bias_init", [0.0, 0.0, 0.0]), dtype=float
-        ).reshape(3)
-
-        # Hard-iron offset (in body frame after rotation)
-        self.hard_iron: np.ndarray = np.asarray(
-            mag_cfg.get("hard_iron", [0.0, 0.0, 0.0]), dtype=float
-        ).reshape(3)
-
-        # Soft-iron matrix (scale + cross-axis)
-        soft = mag_cfg.get("soft_iron", None)
-        if soft is None:
-            self.soft_iron = np.eye(3, dtype=float)
-        else:
-            self.soft_iron = np.asarray(soft, dtype=float).reshape(3, 3)
+        # Hard-iron and soft-iron calibration errors
+        self.hard_iron: np.ndarray = np.asarray(mag_cfg.get("hard_iron", [0.0, 0.0, 0.0]), float).reshape(3)
+        self.soft_iron: np.ndarray = np.asarray(mag_cfg.get("soft_iron", np.eye(3)), float).reshape(3, 3)
 
         # Spike config
         spikes_cfg = mag_cfg.get("spikes", {})
@@ -61,22 +45,11 @@ class SensorMagnetometer:
         self.spike_magnitude: float = spikes_cfg.get("magnitude", 0.0)
         self.spike_probability: float = spikes_cfg.get("probability", 0.0)
 
-        # Measurement noise covariance (white noise)
-        eps_R = 1e-12
-        var = max(self.mag_std**2, eps_R)
-        self.R = var * np.eye(3)
-        logger.debug(f"Magnetometer measurement noise covariance R set to:\n{self.R}")
+        # Set measurement noise covariance
+        self.R = np.eye(3) * self.mag_std**2
+        logger.debug(f"Magnetometer measurement noise covariance R set to {self.mag_std**2:.2e} * I")
 
     # ---- internal helpers -------------------------------------------------
-
-    def _update_bias(self) -> None:
-        """Random-walk update of bias."""
-        if self.bias_rw_std <= 0.0:
-            return
-        # If bias_rw_std is specified as per sqrt(s), use sqrt(dt) scaling.
-        self.bias += np.random.normal(
-            0.0, self.bias_rw_std * np.sqrt(self.dt), size=3
-        )
 
     def _maybe_spike(self) -> np.ndarray:
         """Generate a spike vector or zero."""
@@ -117,12 +90,9 @@ class SensorMagnetometer:
         R_bn = R_nb.T               # nav-to-body
         B_b = R_bn @ B_n            # true field in body frame
 
-        # Update and apply bias
-        self._update_bias()
-
         # Apply hard- and soft-iron effects
-        # z_ideal = S (B_b + hard_iron) + bias
-        z_ideal = self.soft_iron @ (B_b + self.hard_iron) + self.bias
+        # z_ideal = S * (B_b + hard_iron)
+        z_ideal = self.soft_iron @ (B_b + self.hard_iron) 
 
         # Add white measurement noise
         noise = np.random.normal(0.0, self.mag_std, size=3)
@@ -144,13 +114,17 @@ class SensorMagnetometer:
         with S = soft_iron, h_HI = hard_iron.
 
         With attitude error δθ in body frame and
-            R_bn_true ≈ (I - [δθ×]) R_bn,
-        you get δB_b ≈ [B_b×] δθ and
+            R_bn_true ≈ (I + [δθ×]) R_bn,
+        we have:
+            z_true = R_bn_true · B_n ≈ (I + [δθ×]) R_bn · B_n
+                   = R_bn · B_n + [δθ×] · B_b
+                   = z_nom + [δθ×] · B_b
 
-            δz ≈ S [B_b×] δθ
+        Using [a]× · b = -[b]× · a:
+            δz = z_true - z_nom ≈ [δθ×] · B_b = -[B_b]× · δθ
 
         so:
-            ∂z/∂(δθ) = S [B_b×]
+            ∂z/∂(δθ) = -[B_b]×
         """
         B_n = np.asarray(B_n, float).reshape(3)
 
@@ -160,7 +134,7 @@ class SensorMagnetometer:
         B_b = R_bn @ B_n  # field in body frame before iron effects
 
         H = np.zeros((3, 6))
-        H[:, 0:3] = self.soft_iron @ get_skew_matrix(B_b)
+        H[0:3, 0:3] = get_skew_matrix(B_b)  # REVERTED: Original sign
         return H
 
     def pred_from_est(self, x_est: EskfState, B_n: np.ndarray) -> MultiVarGauss[np.ndarray]:
@@ -178,7 +152,9 @@ class SensorMagnetometer:
         R_bn = R_nb.T
 
         B_b = R_bn @ B_n
-        z_pred = self.soft_iron @ (B_b + self.hard_iron)
+        z_pred = B_b
+        # Don't normalize - B_n is already unit norm and rotation preserves norm
+        # z_pred /= np.linalg.norm(z_pred)  # REMOVED: Inconsistent with Jacobian
 
         H = self.H(x_nom, B_n)
         S = H @ x_est.err.cov @ H.T + self.R
@@ -196,14 +172,9 @@ class SensorMagnetometer:
         S = H @ x_est.err.cov @ H.T + self.R
         K = x_est.err.cov @ H.T @ np.linalg.inv(S)
         return K
-
-    
-    
-
-
 class SensorSunVector:
-    def __init__(self):
-        config = load_yaml("config.yaml")
+    def __init__(self, config_path: str = "config.yaml"):
+        config = load_yaml(config_path)
         sun_cfg = config["sensors"]["sun"]
 
         self.dt = sun_cfg["dt"]
@@ -311,15 +282,10 @@ class SensorSunVector:
         if cos_incidence < self.cos_fov_half:
             return None
 
-        # Update bias
-        self._update_bias()
-
-        # Generate noise and spikes
-        noise = self._tangential_noise(s_b)
         spike = self._maybe_spike()
 
         # Apply bias, noise, spikes
-        z = s_b + self.bias + noise + spike
+        z = s_b + self.bias + spike
 
         # Renormalize to unit vector
         nrm = np.linalg.norm(z)
@@ -331,14 +297,20 @@ class SensorSunVector:
     # ---- ESKF related methods (unchanged interface) -----------------------
 
     def H(self, x_nom: NominalState, s_n: np.ndarray) -> np.ndarray:
-        """Jacobian wrt 6D error state [δθ; δb_g]."""
+        """Jacobian wrt 6D error state [δθ; δb_g].
+
+        Same derivation as magnetometer:
+            δz = -[s_b]× · δθ
+        so:
+            ∂z/∂(δθ) = -[s_b]×
+        """
         s_n = np.asarray(s_n, float).reshape(3)
         R_nb = x_nom.ori.as_rotmat()
         R_bn = R_nb.T
         z_pred = R_bn @ s_n
 
         H = np.zeros((3, 6))
-        H[:, 0:3] = get_skew_matrix(z_pred)
+        H[0:3, 0:3] = get_skew_matrix(z_pred)  # REVERTED: Original sign
         return H
 
     def pred_from_est(self, x_est: EskfState, s_n: np.ndarray) -> MultiVarGauss[np.ndarray]:
@@ -365,12 +337,10 @@ class SensorSunVector:
         H = self.H(x_est.nom, s_n)
         S = H @ x_est.err.cov @ H.T + self.R
         K = x_est.err.cov @ H.T @ np.linalg.inv(S)
-        return K
-
-    
+        return K    
 class SensorStarTracker:
-    def __init__(self):
-        config = load_yaml("config.yaml")
+    def __init__(self, config_path: str = "config.yaml"):
+        config = load_yaml(config_path)
         st_cfg = config["sensors"]["star"]
 
         self.dt: float = st_cfg["dt"]
@@ -467,9 +437,6 @@ class SensorStarTracker:
         if self._maybe_dropout(omega_body):
             return None
 
-        # Update small-angle bias
-        self._update_bias()
-
         # Small-angle white noise
         delta_theta = np.random.normal(0.0, self.st_std, size=3)
 
@@ -489,14 +456,14 @@ class SensorStarTracker:
             eta = axis * np.sin(half_angle)
             q_error = Quaternion(mu, eta)
 
-        return q_true.multiply(q_error).normalize()
+        return q_error.multiply(q_true)
 
     # ---------- ESKF interface (unchanged) ----------
 
     def H(self, x_nom: NominalState) -> np.ndarray:
         """Jacobian wrt 6D error state [δθ; δb_g]."""
         H = np.zeros((3, 6))
-        H[:, 0:3] = np.eye(3)
+        H[0:3, 0:3] = np.eye(3)
         return H
 
     def quat_error(self, q_nom: Quaternion, q_meas: Quaternion) -> np.ndarray:
@@ -510,7 +477,8 @@ class SensorStarTracker:
             arr_meas = -arr_meas
             q_meas = Quaternion(arr_meas[0], arr_meas[1:4])
 
-        q_err = q_nom.conjugate().multiply(q_meas).normalize()
+        # Error quaternion: δq = q_meas ⊗ q_nom^{-1}
+        q_err = q_meas.multiply(q_nom.conjugate())
         return 2.0 * q_err.eta
 
     def pred_from_est(self, x_est: EskfState, q_meas: Quaternion) -> MultiVarGauss[np.ndarray]:

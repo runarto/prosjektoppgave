@@ -39,8 +39,8 @@ class ProcessModel:
         P_{k+1} = F P_k Fᵀ + G Q_d Gᵀ
     """
     
-    def __init__(self):
-        config = load_yaml("config.yaml")
+    def __init__(self, config_path: str = "config.yaml") -> None:
+        config = load_yaml(config_path)
 
         # sample time used for process discretization
         self.dt = float(config["process_model"]["dt"])

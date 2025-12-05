@@ -1,0 +1,93 @@
+# Rapid Tumbling Scenario
+# High angular velocity causes star tracker dropout
+
+time:
+  process_dt: 0.02
+  sim_dt: 0.02
+  sim_T: 3000.0               # 50 minutes
+  start_jd: 2459980.5
+
+sensors:
+  gyro:
+    dt: 0.02                  # 50 Hz
+    noise:
+      gyro_std: 1.0e-6        # rad/s, fiber optic gyro
+      noise_rw: 1.0e-7        # rad/sqrt(s)
+      arw_deg: 0.001          # deg/sqrt(hr)
+      bias_instability_deg_per_h: 0.01  # deg/h
+    scaling:
+      noise_scale: 1.0
+
+  mag:
+    mag_std: 1.0e-7           # nT-level accuracy
+    dt: 0.1                   # 10 Hz
+
+    bias_rw_std: 1.0e-9
+    bias_init: [1.0e-8, 1.0e-8, 1.0e-8]
+    hard_iron: [0.0, 0.0, 0.0]
+    soft_iron:
+      - [1.00, 0.00, 0.00]
+      - [0.00, 1.00, 0.00]
+      - [0.00, 0.00, 1.00]
+
+    spikes:
+      enabled: false
+
+  sun:
+    dt: 1.0                   # 1 Hz
+    fov_deg: 120.0
+
+    bias:
+      rw_std: 1.0e-9
+      init: [1.0e-7, 1.0e-7, 1.0e-7]
+
+    noise:
+      sun_std: 1.0e-4
+
+    dropout:
+      probability: 0.0
+      use_measurements: true
+
+    spikes:
+      enabled: false
+
+    scaling:
+      noise_scale: 1.0
+
+  star:
+    dt: 0.5                   # 2 Hz
+
+    noise:
+      st_std: 5.0e-6          # rad (~1 arcsecond)
+
+    bias:
+      rw_std: 1.0e-10
+      init: [1.0e-8, 1.0e-8, 1.0e-8]
+
+    dropout:
+      probability: 0.05       # 5% baseline dropout
+      use_measurements: true
+      max_rate_deg_s: 2.0     # ENABLED: Dropout above 2°/s (aggressive)
+
+    spikes:
+      enabled: false
+
+    scaling:
+      noise_scale: 1.0
+
+process_model:
+  dt: 0.02
+
+omega_profile:
+  # HIGH angular velocities - rapid tumbling scenario
+  amplitude:
+    x: 0.15                   # rad/s (~8.6°/s - will trigger star tracker dropout)
+    y: 0.12                   # rad/s (~6.9°/s)
+    z: 0.10                   # rad/s (~5.7°/s)
+  frequency:
+    x: 0.02                   # Hz (faster variations)
+    y: 0.015                  # Hz
+    z: 0.01                   # Hz
+
+simulation:
+  run_name: "rapid_tumbling"

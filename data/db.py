@@ -43,11 +43,16 @@ class SimulationDatabase:
             bx_meas REAL, by_meas REAL, bz_meas REAL,
             sx_meas REAL, sy_meas REAL, sz_meas REAL,
             st_q0 REAL, st_q1 REAL, st_q2 REAL, st_q3 REAL,
+            bx_eci REAL, by_eci REAL, bz_eci REAL,
+            sx_eci REAL, sy_eci REAL, sz_eci REAL,
 
             FOREIGN KEY(run_id) REFERENCES runs(id)
         );
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_samples_run ON samples(run_id, idx);")
+
+        # Migrate existing schema if needed (add b_eci and s_eci columns)
+        self._migrate_schema_add_eci_vectors(cur)
 
         # --- NEW: estimation runs ---
         cur.execute("""
@@ -88,6 +93,20 @@ class SimulationDatabase:
 
         self.conn.commit()
 
+    def _migrate_schema_add_eci_vectors(self, cur):
+        """Migrate existing schema to add b_eci and s_eci columns if they don't exist."""
+        # Check if columns exist
+        cur.execute("PRAGMA table_info(samples);")
+        columns = [row[1] for row in cur.fetchall()]
+
+        eci_columns = ['bx_eci', 'by_eci', 'bz_eci', 'sx_eci', 'sy_eci', 'sz_eci']
+
+        for col in eci_columns:
+            if col not in columns:
+                logger.info(f"Adding column {col} to samples table")
+                cur.execute(f"ALTER TABLE samples ADD COLUMN {col} REAL;")
+
+        self.conn.commit()
 
     def insert_run(self, result: SimulationResult) -> int:
         """Insert a new run and all its samples; return run_id."""
@@ -111,6 +130,8 @@ class SimulationDatabase:
             b_meas = result.mag_meas[k]
             s_meas = result.sun_meas[k]
             st = result.st_meas[k]
+            b_eci = result.b_eci[k]
+            s_eci = result.s_eci[k]
 
             rows.append((
                 run_id, k, float(result.t[k]), float(result.jd[k]),
@@ -121,6 +142,8 @@ class SimulationDatabase:
                 float(b_meas[0]), float(b_meas[1]), float(b_meas[2]),
                 float(s_meas[0]), float(s_meas[1]), float(s_meas[2]),
                 float(st[0]), float(st[1]), float(st[2]), float(st[3]),
+                float(b_eci[0]), float(b_eci[1]), float(b_eci[2]),
+                float(s_eci[0]), float(s_eci[1]), float(s_eci[2]),
             ))
 
         cur.executemany("""
@@ -132,7 +155,9 @@ class SimulationDatabase:
                 wx_meas, wy_meas, wz_meas,
                 bx_meas, by_meas, bz_meas,
                 sx_meas, sy_meas, sz_meas,
-                st_q0, st_q1, st_q2, st_q3
+                st_q0, st_q1, st_q2, st_q3,
+                bx_eci, by_eci, bz_eci,
+                sx_eci, sy_eci, sz_eci
             ) VALUES (?, ?, ?, ?,
                       ?, ?, ?, ?,
                       ?, ?, ?,
@@ -140,7 +165,9 @@ class SimulationDatabase:
                       ?, ?, ?,
                       ?, ?, ?,
                       ?, ?, ?,
-                      ?, ?, ?, ?);
+                      ?, ?, ?, ?,
+                      ?, ?, ?,
+                      ?, ?, ?);
         """, rows)
 
         self.conn.commit()
@@ -313,7 +340,9 @@ class SimulationDatabase:
                    wx_meas, wy_meas, wz_meas,
                    bx_meas, by_meas, bz_meas,
                    sx_meas, sy_meas, sz_meas,
-                   st_q0, st_q1, st_q2, st_q3
+                   st_q0, st_q1, st_q2, st_q3,
+                   bx_eci, by_eci, bz_eci,
+                   sx_eci, sy_eci, sz_eci
             FROM samples
             WHERE run_id=?
             ORDER BY idx ASC;
@@ -330,6 +359,8 @@ class SimulationDatabase:
         mag_meas = np.zeros((N, 3))
         sun_meas = np.zeros((N, 3))
         st_meas = np.zeros((N, 4))
+        b_eci = np.zeros((N, 3))
+        s_eci = np.zeros((N, 3))
 
         for i, r in enumerate(rows):
             (_, t_i, jd_i,
@@ -339,7 +370,9 @@ class SimulationDatabase:
              wxm,wym,wzm,
              bx,by,bz,
              sx,sy,sz,
-             st0,st1,st2,st3) = r
+             st0,st1,st2,st3,
+             bx_eci_i,by_eci_i,bz_eci_i,
+             sx_eci_i,sy_eci_i,sz_eci_i) = r
 
             t[i] = t_i
             jd[i] = jd_i
@@ -350,6 +383,8 @@ class SimulationDatabase:
             mag_meas[i] = [bx,by,bz]
             sun_meas[i] = [sx,sy,sz]
             st_meas[i] = [st0,st1,st2,st3]
+            b_eci[i] = [bx_eci_i,by_eci_i,bz_eci_i]
+            s_eci[i] = [sx_eci_i,sy_eci_i,sz_eci_i]
 
         return SimulationResult(
             t=t, jd=jd,
@@ -360,6 +395,8 @@ class SimulationDatabase:
             mag_meas=mag_meas,
             sun_meas=sun_meas,
             st_meas=st_meas,
+            b_eci=b_eci,
+            s_eci=s_eci,
             config=cfg,
         )
         

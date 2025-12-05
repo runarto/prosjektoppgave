@@ -66,13 +66,14 @@ class AttitudePlotter:
         """
         sim_result = self.db.load_run(sim_run_id)
         est_result = self._load_estimation_run(est_run_id)
+        cutoff = len(est_result.t)  # in case est shorter than sim
 
-        t_true = sim_result.t
+        t_true = sim_result.t[:cutoff]
         t_est  = est_result.t
         if len(t_true) != len(t_est) or not np.allclose(t_true, t_est):
             raise ValueError("Time grids of simulation and estimation differ; interpolate first.")
 
-        q_true = sim_result.q_true
+        q_true = sim_result.q_true[:cutoff]
         q_est  = est_result.q_est
 
         e_true = self._quat_seq_to_euler(q_true) * 180.0 / np.pi
@@ -105,13 +106,14 @@ class AttitudePlotter:
         """
         sim_result = self.db.load_run(sim_run_id)
         est_result = self._load_estimation_run(est_run_id)
+        cutoff = len(est_result.t)  # in case est shorter than sim
 
-        t_true = sim_result.t
+        t_true = sim_result.t[:cutoff]
         t_est = est_result.t
         if len(t_true) != len(t_est) or not np.allclose(t_true, t_est):
             raise ValueError("Time grids of simulation and estimation differ; interpolate first.")
 
-        q_true = sim_result.q_true
+        q_true = sim_result.q_true[:cutoff]
         q_est  = est_result.q_est
 
         angle_err_rad = self._quat_angle_error(q_true, q_est)
@@ -251,8 +253,8 @@ if __name__ == "__main__":
     plotter = AttitudePlotter(db_path="simulations.db")
 
     sim_run_id = 1
-    eskf_run_id = 1  # whatever id you used for the KF
-    fgo_run_id  = 3  # your FGO run id
+    eskf_run_id = 2  # whatever id you used for the KF
+    fgo_run_id  = 1  # your FGO run id
     
     #plotter.plot_angular_velocity_true_vs_meas(sim_run_id)
     
