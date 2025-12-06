@@ -390,7 +390,7 @@ class GtsamFGO:
                 # ∂v_pred/∂θ = -[v_pred]×
                 # Therefore: ∂e/∂θ = -(-[v_pred]×) = [v_pred]×
                 
-                v_pred_skew = skew(v_pred)
+                v_pred_skew = R_mat @ skew(v_n)  # [R^T * v_n]×
                 J = v_pred_skew  # 3×3
                 
                 jacobians[0] = J

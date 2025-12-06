@@ -100,9 +100,19 @@ class AttitudePlotter:
             fig.savefig(fname + ".png", dpi=400, bbox_inches="tight")
         plt.show()
 
-    def plot_attitude_error(self, sim_run_id: int, est_run_id: int, fname: str | None = None):
+    def plot_attitude_error(self, sim_run_id: int, est_run_id: int, fname: str | None = None,
+                           log_scale: bool = False, split_view: bool = False,
+                           split_time: float = 5.0):
         """
         Plot total attitude error angle over time, in degrees, with RMSE line.
+
+        Args:
+            sim_run_id: Simulation run ID
+            est_run_id: Estimation run ID
+            fname: Optional filename for saving
+            log_scale: Use log scale for y-axis (better for large dynamic range)
+            split_view: Create two subplots (convergence + steady-state)
+            split_time: Time in seconds where to split the views (default 5.0s)
         """
         sim_result = self.db.load_run(sim_run_id)
         est_result = self._load_estimation_run(est_run_id)
@@ -120,24 +130,171 @@ class AttitudePlotter:
         angle_err_deg = angle_err_rad * 180.0 / np.pi
         rmse = float(np.sqrt(np.mean(angle_err_deg ** 2)))
 
-        fig, ax = plt.subplots(figsize=(5.0, 2.5))
-        ax.plot(t_true, angle_err_deg, label="Attitude error")
-        ax.plot(t_true, rmse * np.ones_like(t_true),
-                "--", label=f"RMSE = {rmse:.3f} deg")
-        ax.grid(True)
-        ax.set_xlabel("Time [s]")
-        ax.set_ylabel("Attitude error [deg]")
-        ax.set_title("Absolute attitude error")
-        # put legend outside to avoid covering the curve
-        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+        if split_view:
+            # Two-panel plot: convergence + steady-state
+            split_idx = np.searchsorted(t_true, split_time)
 
-        plt.tight_layout()
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.0, 5.0))
+
+            # Top: Initial convergence
+            ax1.plot(t_true[:split_idx], angle_err_deg[:split_idx], label="Attitude error")
+            ax1.axhline(rmse, color='C1', linestyle='--', label=f"RMSE = {rmse:.4f}°")
+            ax1.grid(True, alpha=0.3)
+            ax1.set_ylabel("Attitude error [°]")
+            ax1.set_title(f"Initial Convergence (0-{split_time}s)")
+            ax1.legend()
+
+            # Bottom: Steady-state
+            ax2.plot(t_true[split_idx:], angle_err_deg[split_idx:], label="Attitude error")
+            ax2.axhline(rmse, color='C1', linestyle='--', label=f"RMSE = {rmse:.4f}°")
+            ax2.grid(True, alpha=0.3)
+            ax2.set_xlabel("Time [s]")
+            ax2.set_ylabel("Attitude error [°]")
+            ax2.set_title(f"Steady-State ({split_time}s-end)")
+            ax2.legend()
+
+            plt.tight_layout()
+        else:
+            # Single plot with optional log scale
+            fig, ax = plt.subplots(figsize=(5.0, 2.5))
+            ax.plot(t_true, angle_err_deg, label="Attitude error")
+            ax.axhline(rmse, color='C1', linestyle='--', label=f"RMSE = {rmse:.4f}°")
+
+            if log_scale:
+                ax.set_yscale('log')
+                ax.set_ylabel("Attitude error [°] (log scale)")
+            else:
+                ax.set_ylabel("Attitude error [°]")
+
+            ax.grid(True, alpha=0.3)
+            ax.set_xlabel("Time [s]")
+            ax.set_title("Absolute attitude error")
+            ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+
+            plt.tight_layout()
+
         if fname is not None:
             fig.savefig(fname + ".pdf", bbox_inches="tight")
             fig.savefig(fname + ".png", dpi=400, bbox_inches="tight")
         plt.show()
 
-        
+    def plot_nees(self, sim_run_id: int, est_run_id: int, fname: str | None = None,
+                  alpha: float = 0.05):
+        """
+        Plot NEES (Normalized Estimation Error Squared) and ANEES (Average NEES)
+        with chi-squared confidence intervals.
+
+        Args:
+            sim_run_id: Simulation run ID
+            est_run_id: Estimation run ID
+            fname: Optional filename for saving
+            alpha: Significance level for confidence bounds (default 0.05 for 95% CI)
+        """
+        from scipy.stats import chi2
+
+        sim_result = self.db.load_run(sim_run_id)
+        est_result = self._load_estimation_run(est_run_id)
+        cutoff = len(est_result.t)
+
+        t = est_result.t
+        q_true = sim_result.q_true[:cutoff]
+        q_est = est_result.q_est
+        b_true = sim_result.b_g_true[:cutoff]
+        b_est = est_result.bg_est
+        P_est = est_result.P_est  # (N, 6, 6)
+
+        N = len(t)
+        n = 6  # State dimension (3 attitude + 3 bias)
+
+        # Compute NEES at each timestep
+        nees = np.zeros(N)
+        for k in range(N):
+            # Attitude error (rotation vector)
+            # Filter injection is: q_new = δq ⊗ q_nom, so error is δq = q_true ⊗ q_est^{-1}
+            q_t = Quaternion.from_array(q_true[k])
+            q_e = Quaternion.from_array(q_est[k])
+            q_err = q_t.multiply(q_e.conjugate()).normalize()
+
+            # Convert to rotation vector (3D error)
+            # Use abs(mu) to handle quaternion double-cover (q and -q are same rotation)
+            theta = 2.0 * np.arccos(np.clip(abs(q_err.mu), 0.0, 1.0))
+            if theta < 1e-8:
+                att_err = np.zeros(3)
+            else:
+                # Rotation vector: θ * axis
+                q_eta = q_err.eta
+                att_err = theta * q_eta / np.sin(theta / 2.0)
+
+            # Bias error
+            bias_err = b_est[k] - b_true[k]
+
+            # Full error state (6D)
+            delta_x = np.concatenate([att_err, bias_err])
+
+            # NEES: ε = δx^T * P^{-1} * δx
+            P_k = P_est[k]
+            try:
+                P_inv = np.linalg.inv(P_k)
+                nees[k] = delta_x.T @ P_inv @ delta_x
+            except np.linalg.LinAlgError:
+                # Singular covariance, use pseudoinverse
+                P_inv = np.linalg.pinv(P_k)
+                nees[k] = delta_x.T @ P_inv @ delta_x
+
+        # Compute ANEES (cumulative average)
+        anees = np.cumsum(nees) / np.arange(1, N + 1)
+
+        # Chi-squared confidence bounds for ANEES
+        # For ANEES at step k: chi2(n*k, alpha) / k
+        lower_bounds = np.array([chi2.ppf(alpha / 2, n * k) / k for k in range(1, N + 1)])
+        upper_bounds = np.array([chi2.ppf(1 - alpha / 2, n * k) / k for k in range(1, N + 1)])
+
+        # Create plot
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.5, 5.5), sharex=True)
+
+        # Top: NEES
+        ax1.plot(t, nees, alpha=0.7, label='NEES')
+        ax1.axhline(n, color='C3', linestyle='--', label=f'Expected value (n={n})')
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylabel('NEES')
+        ax1.set_title('Normalized Estimation Error Squared')
+        ax1.legend()
+        ax1.set_yscale('log')
+
+        # Bottom: ANEES with confidence bounds
+        ax2.plot(t, anees, label='ANEES', linewidth=1.5)
+        ax2.fill_between(t, lower_bounds, upper_bounds, alpha=0.3,
+                         label=f'{int((1-alpha)*100)}% confidence region')
+        ax2.axhline(n, color='C3', linestyle='--', label=f'Expected value (n={n})')
+        ax2.grid(True, alpha=0.3)
+        ax2.set_xlabel('Time [s]')
+        ax2.set_ylabel('ANEES')
+        ax2.set_title(f'Average NEES with χ² Confidence Bounds')
+        ax2.legend()
+
+        plt.tight_layout()
+
+        if fname is not None:
+            fig.savefig(fname + ".pdf", bbox_inches="tight")
+            fig.savefig(fname + ".png", dpi=400, bbox_inches="tight")
+        plt.show()
+
+        # Print summary statistics
+        consistent = np.sum((anees >= lower_bounds) & (anees <= upper_bounds))
+        consistency_rate = 100 * consistent / N
+        print(f"\nNEES Statistics:")
+        print(f"  Mean NEES: {np.mean(nees):.2f} (expected: {n})")
+        print(f"  Mean ANEES: {np.mean(anees):.2f} (expected: {n})")
+        print(f"  Filter consistency: {consistency_rate:.1f}% of time within {int((1-alpha)*100)}% bounds")
+
+        if anees[-1] < lower_bounds[-1]:
+            print(f"  ⚠️  Filter may be underconfident (P too large, filter too conservative)")
+        elif anees[-1] > upper_bounds[-1]:
+            print(f"  ⚠️  Filter may be overconfident (P too small, filter too optimistic)")
+        else:
+            print(f"  ✓ Filter appears consistent")
+
+
     def plot_euler_kf_vs_fgo(
         self,
         sim_run_id: int,

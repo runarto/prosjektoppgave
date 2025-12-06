@@ -7,14 +7,14 @@ sensors:
   gyro:
     dt: 0.02
     noise:
-      gyro_std: 1.0e-06
-      noise_rw: 1.0e-07
-      arw_deg: 0.001
+      # STIM300 specifications (from Safran datasheet)
+      arw_deg: 0.15         # Angle Random Walk [deg/√h]
+      rrw_deg: 0.5          # Rate Random Walk [deg/h/√h] (estimated ≈ bias instability)
       bias_instability_deg_per_h: 0.01
     scaling:
       noise_scale: 1.0
   mag:
-    mag_std: 1.0e-07
+    mag_std: 1.0e-3
     dt: 0.1
     bias_rw_std: 1.0e-09
     bias_init:
@@ -47,7 +47,7 @@ sensors:
       - 1.0e-07
       - 1.0e-07
     noise:
-      sun_std: 0.0001
+      sun_std: 1.0e-04
     dropout:
       probability: 0.0
       use_measurements: true

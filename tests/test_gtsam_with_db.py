@@ -12,6 +12,8 @@ This script:
 
 import numpy as np
 import sys
+import argparse
+from pathlib import Path
 from typing import List, Optional
 
 from data.db import SimulationDatabase
@@ -20,6 +22,7 @@ from estimation.gtsam_fg import GtsamFGO, WindowSample, SlidingWindow
 from utilities.quaternion import Quaternion
 from utilities.states import NominalState
 from environment.environment import OrbitEnvironmentModel
+from plotting.comparison_plotter import ComparisonPlotter, EstimationResults
 
 
 def compute_attitude_error_deg(q_true: Quaternion, q_est: Quaternion) -> float:
@@ -88,8 +91,9 @@ def run_gtsam_on_simulation(
     max_samples: Optional[int] = None,
     skip_samples: int = 1,
     save_results: bool = False,
-    est_name: str = "gtsam_fgo_test"
-) -> PerformanceMetrics:
+    est_name: str = "gtsam_fgo_test",
+    scenario_name: str = "Unknown"
+) -> tuple[PerformanceMetrics, Optional[EstimationResults]]:
     """
     Run GTSAM factor graph optimization on simulation data.
 
@@ -125,7 +129,7 @@ def run_gtsam_on_simulation(
         print(f"  Subsampling: every {skip_samples} sample(s)")
 
     # Initialize
-    fgo = GtsamFGO(max_iters=50, tol=1e-6, config_path=config_path)
+    fgo = GtsamFGO(config_path=config_path)
     env = OrbitEnvironmentModel()
     window = SlidingWindow(max_len=window_size)
     metrics = PerformanceMetrics()
@@ -271,14 +275,51 @@ def run_gtsam_on_simulation(
     # Print summary
     metrics.print_summary()
 
-    return metrics
+    # Create EstimationResults for plotting (if we have data)
+    estimation_results = None
+    if len(metrics.attitude_errors_deg) > 0:
+        # Convert metrics to arrays for EstimationResults
+        att_errors = np.array(metrics.attitude_errors_deg)
+        bias_errors = np.array(metrics.bias_errors)
+        bias_error_norms = np.linalg.norm(bias_errors, axis=1)
+        timestamps = np.array(metrics.timestamps)
+
+        # We don't have sigma bounds from FGO, so use zeros
+        sigma_att = np.zeros_like(att_errors)
+        sigma_bias = np.zeros_like(bias_error_norms)
+
+        estimation_results = EstimationResults(
+            t=timestamps,
+            attitude_error=att_errors,
+            bias_error=bias_error_norms,
+            sigma_attitude=sigma_att,
+            sigma_bias=sigma_bias,
+            method_name="FGO",
+            scenario_name=scenario_name
+        )
+
+    return metrics, estimation_results
 
 
 def main():
     """Main test function."""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Test GTSAM Factor Graph Optimization")
+    parser.add_argument("--plot", action="store_true", help="Generate plots of results")
+    args = parser.parse_args()
+
     print("\n" + "="*60)
     print("GTSAM Factor Graph - Database Test Suite")
     print("="*60)
+
+    # Create output directory if plotting is enabled
+    output_dir = None
+    plotter = None
+    if args.plot:
+        output_dir = Path("output/fgo")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        plotter = ComparisonPlotter()
+        print(f"\nPlotting enabled. Plots will be saved to: {output_dir}/")
 
     # Connect to database
     db_path = "simulations.db"
@@ -304,11 +345,11 @@ def main():
     # Test configuration
     TEST_CONFIGS = [
         {
-            "name": "Perfect measurements (10000 samples, window=100)",
-            "path": "configs/config_spacegrade_realistic.yaml",
+            "name": "Rapid tumbling",
+            "path": "configs/config_baseline_short.yaml",
             "sim_run_id": 1,
             "window_size": 400,
-            "max_samples": 10000,
+            "max_samples": None,
             "skip_samples": 1,
             "save_results": False,
         },
@@ -350,7 +391,7 @@ def main():
         print("="*60)
 
         try:
-            metrics = run_gtsam_on_simulation(
+            metrics, est_results = run_gtsam_on_simulation(
                 db=db,
                 config_path=config["path"],
                 sim_run_id=config["sim_run_id"],
@@ -358,12 +399,24 @@ def main():
                 max_samples=config.get("max_samples"),
                 skip_samples=config.get("skip_samples", 1),
                 save_results=config.get("save_results", False),
-                est_name=f"gtsam_test_{i+1}"
+                est_name=f"gtsam_test_{i+1}",
+                scenario_name=config["name"]
             )
             results[config["name"]] = {
                 "success": True,
                 "metrics": metrics
             }
+
+            # Generate plot if enabled and results are available
+            if args.plot and plotter and est_results:
+                scenario_filename = config["name"].lower().replace(" ", "_").replace("(", "").replace(")", "")
+                plot_path = output_dir / f"{scenario_filename}_fgo.png"
+                plotter.plot_attitude_comparison(
+                    [est_results],
+                    filename=plot_path,
+                    title=f"{config['name']}: Factor Graph Optimization"
+                )
+                print(f"  Plot saved to: {plot_path}")
         except Exception as e:
             print(f"\nTest failed with error: {e}")
             import traceback

@@ -23,7 +23,7 @@ class Quaternion:
         q = np.asarray(q, float).reshape(4)
         return Quaternion(q[0], q[1:4])._canonical()
 
-    def as_array(self):
+    def as_array(self) -> np.ndarray:
         return np.concatenate(([self.mu], self.eta))
 
     def normalize(self, eps: float = 1e-12):

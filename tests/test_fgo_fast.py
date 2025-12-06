@@ -32,7 +32,7 @@ def main():
 
     # Load simulation data
     db = SimulationDatabase("simulations.db")
-    sim = db.load_run(9)
+    sim = db.load_run(1)
 
     print(f"\nLoaded simulation run 9:")
     print(f"  Duration: {sim.t[-1]:.1f} seconds")

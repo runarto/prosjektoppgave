@@ -29,7 +29,7 @@ def main():
     # Load simulation data
     db = SimulationDatabase("simulations.db")
     print("Loading simulation run 9 (baseline)...", flush=True)
-    sim = db.load_run(9)
+    sim = db.load_run(1)
     print("Simulation loaded!", flush=True)
 
     print(f"\nLoaded simulation run 9:", flush=True)
@@ -73,7 +73,7 @@ def main():
     n_sun_used = 0
     n_optimizations = 0
 
-    for k in range(30000):
+    for k in range(len(sim.t)):
         print(f"Processing sample {k+1}/{len(sim.t)}", flush=True)
         if k == 0:
             dt = 0.02

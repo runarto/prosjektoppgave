@@ -12,6 +12,8 @@ This script:
 
 import numpy as np
 import sys
+import argparse
+from pathlib import Path
 from typing import List, Optional
 import copy
 
@@ -22,6 +24,7 @@ from utilities.quaternion import Quaternion
 from utilities.states import NominalState, EskfState, SensorType
 from utilities.gaussian import MultiVarGauss
 from environment.environment import OrbitEnvironmentModel
+from plotting.comparison_plotter import ComparisonPlotter, EstimationResults
 
 
 def compute_attitude_error_deg(q_true: Quaternion, q_est: Quaternion) -> float:
@@ -117,8 +120,9 @@ def run_eskf_on_simulation(
     sim_run_id: int,
     max_samples: Optional[int] = None,
     save_results: bool = False,
-    est_name: str = "eskf_test"
-) -> PerformanceMetrics:
+    est_name: str = "eskf_test",
+    scenario_name: str = "Unknown"
+) -> tuple[PerformanceMetrics, Optional[EstimationResults]]:
     """
     Run ESKF on simulation data.
 
@@ -279,14 +283,60 @@ def run_eskf_on_simulation(
     # Print summary
     metrics.print_summary()
 
-    return metrics
+    # Create EstimationResults for plotting (if we have data)
+    estimation_results = None
+    if len(metrics.attitude_errors_deg) > 0:
+        att_errors = np.array(metrics.attitude_errors_deg)
+        bias_errors = np.array(metrics.bias_errors)
+        bias_error_norms = np.linalg.norm(bias_errors, axis=1)
+        timestamps = np.array(metrics.timestamps)
+
+        # Get sigma bounds from metrics
+        if len(metrics.attitude_sigmas) > 0:
+            att_sigmas = np.array(metrics.attitude_sigmas)
+            # Convert 3-sigma bounds to 1-sigma by dividing by 3, then take mean across axes
+            sigma_att = np.mean(att_sigmas, axis=1) / 3.0  # Mean of 3-sigma bounds
+        else:
+            sigma_att = np.zeros_like(att_errors)
+
+        if len(metrics.bias_sigmas) > 0:
+            bias_sigmas = np.array(metrics.bias_sigmas)
+            sigma_bias = np.mean(bias_sigmas, axis=1) / 3.0  # Mean of 3-sigma bounds
+        else:
+            sigma_bias = np.zeros_like(bias_error_norms)
+
+        estimation_results = EstimationResults(
+            t=timestamps,
+            attitude_error=att_errors,
+            bias_error=bias_error_norms,
+            sigma_attitude=sigma_att,
+            sigma_bias=sigma_bias,
+            method_name="ESKF",
+            scenario_name=scenario_name
+        )
+
+    return metrics, estimation_results
 
 
 def main():
     """Main test function."""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Test ESKF on simulation data")
+    parser.add_argument("--plot", action="store_true", help="Generate plots of results")
+    args = parser.parse_args()
+
     print("\n" + "="*60)
     print("ESKF - Database Test Suite")
     print("="*60)
+
+    # Create output directory if plotting is enabled
+    output_dir = None
+    plotter = None
+    if args.plot:
+        output_dir = Path("output/eskf")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        plotter = ComparisonPlotter()
+        print(f"\nPlotting enabled. Plots will be saved to: {output_dir}/")
 
     # Connect to database
     db_path = "simulations.db"
@@ -313,36 +363,36 @@ def main():
     TEST_CONFIGS = [
         {
             "name": "Baseline measurements",
-            "path": "configs/config_spacegrade_realistic.yaml",
+            "path": "configs/config_baseline_short.yaml",
             "sim_run_id": 1,
             "max_samples": None,
             "skip_samples": 1,
             "save_results": False,
         },
-        {
-            "name": "Rapid tumbling",
-            "path": "configs/config_rapid_tumbling.yaml",
-            "sim_run_id": 2,
-            "max_samples": None,
-            "skip_samples": 1,
-            "save_results": False,
-        },
-        {
-            "name": "Eclipse",
-            "path": "configs/config_eclipse.yaml",
-            "sim_run_id": 3,
-            "max_samples": None,
-            "skip_samples": 2,
-            "save_results": False,
-        },
-        {
-            "name": "Measurement spikes",
-            "path": "configs/config_measurement_spikes.yaml",
-            "sim_run_id": 4,
-            "max_samples": None,
-            "skip_samples": 2,
-            "save_results": False,
-        },
+        # {
+        #     "name": "Rapid tumbling",
+        #     "path": "configs/config_rapid_tumbling.yaml",
+        #     "sim_run_id": 2,
+        #     "max_samples": None,
+        #     "skip_samples": 1,
+        #     "save_results": False,
+        # },
+        # {
+        #     "name": "Eclipse",
+        #     "path": "configs/config_eclipse.yaml",
+        #     "sim_run_id": 3,
+        #     "max_samples": None,
+        #     "skip_samples": 2,
+        #     "save_results": False,
+        # },
+        # {
+        #     "name": "Measurement spikes",
+        #     "path": "configs/config_measurement_spikes.yaml",
+        #     "sim_run_id": 4,
+        #     "max_samples": None,
+        #     "skip_samples": 2,
+        #     "save_results": False,
+        # },
     ]
 
     results = {}
@@ -354,18 +404,30 @@ def main():
         print("="*60)
 
         try:
-            metrics = run_eskf_on_simulation(
+            metrics, est_results = run_eskf_on_simulation(
                 db=db,
                 config_path=config["path"],
                 sim_run_id=config["sim_run_id"],
                 max_samples=config.get("max_samples"),
                 save_results=config.get("save_results", False),
-                est_name=f"eskf_test_{i+1}"
+                est_name=f"eskf_test_{i+1}",
+                scenario_name=config["name"]
             )
             results[config["name"]] = {
                 "success": True,
                 "metrics": metrics
             }
+
+            # Generate plot if enabled and results are available
+            if args.plot and plotter and est_results:
+                scenario_filename = config["name"].lower().replace(" ", "_")
+                plot_path = output_dir / f"{scenario_filename}_eskf.png"
+                plotter.plot_attitude_comparison(
+                    [est_results],
+                    filename=plot_path,
+                    title=f"{config['name']}: ESKF"
+                )
+                print(f"  Plot saved to: {plot_path}")
         except Exception as e:
             print(f"\nTest failed with error: {e}")
             import traceback

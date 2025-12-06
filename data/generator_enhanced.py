@@ -184,8 +184,12 @@ class EnhancedAttitudeDataGenerator:
 
         b_g_true = np.zeros(3)
 
-        # True gyro-bias random walk std
-        sigma_bg_true = np.deg2rad(self.config["sensors"]["gyro"]["noise"]["noise_rw"])
+        # True gyro-bias random walk: derive from RRW in deg/h/√h
+        # RRW means after 1 hour, bias has std = RRW [deg/h]
+        # Convert to continuous-time density σ_bg [rad/s/√s]:
+        #   σ_bg = RRW × (π/180) / 3600 / 60
+        RRW_deg = self.config["sensors"]["gyro"]["noise"]["rrw_deg"]
+        sigma_bg_true = RRW_deg * (np.pi / 180.0) / 3600.0 / 60.0
 
         # Storage for frozen measurements
         frozen_mag = None

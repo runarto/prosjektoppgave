@@ -11,20 +11,33 @@ logger = get_logger(__name__)
 
 @dataclass
 class SensorGyro:
-    
+    """Gyro sensor model based on STIM300 specifications.
+
+    Noise model:
+        ω_meas = ω_true + b_g + n_g
+
+    where n_g is white noise derived from Angle Random Walk (ARW).
+    """
+
     def __init__(self, config_path: str = "config.yaml"):
         config = load_yaml(config_path)
         self.dt = config["sensors"]["gyro"]["dt"]
-        ARW_deg = config["sensors"]["gyro"]["noise"]["arw_deg"]  # e.g. 0.15 deg / sqrt(h)
 
-        self.noise_rw = ARW_deg * np.pi/180 / np.sqrt(3600.0)  # rad / sqrt(s)
-        self.gyro_std = self.noise_rw / np.sqrt(self.dt)                 # rad / s (per 
+        # ARW in deg/√h from datasheet (e.g., STIM300: 0.15 deg/√h)
+        ARW_deg = config["sensors"]["gyro"]["noise"]["arw_deg"]
 
-    def __post_init__(self):
-        self.R = np.eye(3) * self.gyro_std**2
-    
+        # Continuous-time noise density [rad/√s]
+        self.sigma_g = ARW_deg * (np.pi / 180.0) / 60.0
+
+        # Discrete sample noise std [rad/s]
+        # For sampling at interval dt: σ_sample = σ_g / √dt
+        self.gyro_std = self.sigma_g / np.sqrt(self.dt)
+
+        logger.debug(f"SensorGyro initialized: ARW={ARW_deg} deg/√h, "
+                     f"σ_g={self.sigma_g:.2e} rad/√s, gyro_std={self.gyro_std:.2e} rad/s")
+
     def sample(self, omega_true: np.ndarray) -> np.ndarray:
-        """Sample a gyro measurement from the nominal state."""
+        """Sample a gyro measurement with white noise."""
         noise = np.random.normal(0.0, self.gyro_std, size=3)
         return omega_true + noise
 class SensorMagnetometer:
@@ -45,7 +58,7 @@ class SensorMagnetometer:
         self.spike_magnitude: float = spikes_cfg.get("magnitude", 0.0)
         self.spike_probability: float = spikes_cfg.get("probability", 0.0)
 
-        # Set measurement noise covariance
+        # Set measurement noise covariance R = sigma^2 * I
         self.R = np.eye(3) * self.mag_std**2
         logger.debug(f"Magnetometer measurement noise covariance R set to {self.mag_std**2:.2e} * I")
 
@@ -90,9 +103,8 @@ class SensorMagnetometer:
         R_bn = R_nb.T               # nav-to-body
         B_b = R_bn @ B_n            # true field in body frame
 
-        # Apply hard- and soft-iron effects
-        # z_ideal = S * (B_b + hard_iron)
-        z_ideal = self.soft_iron @ (B_b + self.hard_iron) 
+        # NO hard- and soft-iron effects per user requirement (no bias, only noise)
+        z_ideal = B_b
 
         # Add white measurement noise
         noise = np.random.normal(0.0, self.mag_std, size=3)
@@ -134,7 +146,7 @@ class SensorMagnetometer:
         B_b = R_bn @ B_n  # field in body frame before iron effects
 
         H = np.zeros((3, 6))
-        H[0:3, 0:3] = get_skew_matrix(B_b)  # REVERTED: Original sign
+        H[0:3, 0:3] = R_bn @ get_skew_matrix(B_n)  # REVERTED: Original sign
         return H
 
     def pred_from_est(self, x_est: EskfState, B_n: np.ndarray) -> MultiVarGauss[np.ndarray]:
@@ -153,8 +165,6 @@ class SensorMagnetometer:
 
         B_b = R_bn @ B_n
         z_pred = B_b
-        # Don't normalize - B_n is already unit norm and rotation preserves norm
-        # z_pred /= np.linalg.norm(z_pred)  # REMOVED: Inconsistent with Jacobian
 
         H = self.H(x_nom, B_n)
         S = H @ x_est.err.cov @ H.T + self.R
@@ -183,10 +193,6 @@ class SensorSunVector:
         self.fov_half_angle_rad = np.deg2rad(0.5 * sun_cfg.get("fov_deg", 180.0))
         self.cos_fov_half = np.cos(self.fov_half_angle_rad)
 
-        bias_cfg = sun_cfg.get("bias", {})
-        self.bias_rw_std = bias_cfg.get("rw_std", 0.0)
-        self.bias = np.asarray(bias_cfg.get("init", [0.0, 0.0, 0.0]), float).reshape(3)
-
         drop_cfg = sun_cfg.get("dropout", {})
         self.dropout_prob = drop_cfg.get("probability", 0.0)
         self.use_measurements = drop_cfg.get("use_measurements", True)
@@ -196,19 +202,11 @@ class SensorSunVector:
         self.spike_magnitude = spikes_cfg.get("magnitude", 0.0)
         self.spike_probability = spikes_cfg.get("probability", 0.0)
 
-        eps_R = 1e-12
-        var = max((self.sun_std**2) * sun_cfg.get("scaling", {}).get("noise_scale", 1.0), eps_R)
-        self.R = var * np.eye(3)
+        # Set measurement noise covariance R = sigma^2 * I
+        self.R = np.eye(3) * self.sun_std**2
 
 
     # ---- internal helpers -------------------------------------------------
-
-    def _update_bias(self) -> None:
-        """Random-walk update of bias on the sphere (approximate)."""
-        if self.bias_rw_std <= 0.0:
-            return
-        step = np.random.normal(0.0, self.bias_rw_std * np.sqrt(self.dt), size=3)
-        self.bias += step
 
     def _tangential_noise(self, s_b: np.ndarray) -> np.ndarray:
         """Generate noise mostly tangential to the unit sphere at s_b."""
@@ -283,9 +281,10 @@ class SensorSunVector:
             return None
 
         spike = self._maybe_spike()
+        noise = self._tangential_noise(s_b)
 
-        # Apply bias, noise, spikes
-        z = s_b + self.bias + spike
+        # Apply noise and spikes (NO BIAS per user requirement)
+        z = s_b + noise + spike
 
         # Renormalize to unit vector
         nrm = np.linalg.norm(z)
@@ -310,7 +309,7 @@ class SensorSunVector:
         z_pred = R_bn @ s_n
 
         H = np.zeros((3, 6))
-        H[0:3, 0:3] = get_skew_matrix(z_pred)  # REVERTED: Original sign
+        H[0:3, 0:3] = R_bn @ get_skew_matrix(s_n)  # REVERTED: Original sign
         return H
 
     def pred_from_est(self, x_est: EskfState, s_n: np.ndarray) -> MultiVarGauss[np.ndarray]:
@@ -323,7 +322,7 @@ class SensorSunVector:
         z_pred = R_bn @ s_n
 
         H = self.H(x_nom, s_n)
-        S = H @ x_est.err.cov @ H.T + self.R
+        S = -H @ x_est.err.cov @ H.T + self.R
 
         return MultiVarGauss(mean=z_pred, cov=S)
 
@@ -367,10 +366,9 @@ class SensorStarTracker:
         scale_cfg = st_cfg.get("scaling", {})
         noise_scale = scale_cfg.get("noise_scale", 1.0)
 
-        eps_R = 1e-12
-        var = max((self.st_std * noise_scale) ** 2, eps_R)
-        self.R = var * np.eye(3)
-        logger.debug(f"Star tracker measurement noise covariance R set to:\n{self.R}")
+        # Set measurement noise covariance R = sigma^2 * I
+        self.R = np.eye(3) * self.st_std**2
+        logger.debug(f"Star tracker measurement noise covariance R set to {self.st_std**2:.2e} * I")
 
     # ---------- internal helpers ----------
 
@@ -443,8 +441,8 @@ class SensorStarTracker:
         # Add occasional large spike
         delta_theta += self._maybe_spike()
 
-        # Add bias
-        delta_theta += self.bias
+        # NO bias per user requirement (no bias, only noise)
+        # delta_theta += self.bias
 
         angle = np.linalg.norm(delta_theta)
         if angle < 1e-12:

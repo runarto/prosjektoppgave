@@ -45,35 +45,48 @@ class ProcessModel:
         # sample time used for process discretization
         self.dt = float(config["process_model"]["dt"])
 
-        # ---- gyro noise from angle random walk ----
-        # ARW in deg/√h from datasheet / config, e.g. 0.15
+        # ---- Angle Random Walk (gyro white noise) ----
+        # ARW in deg/√h from datasheet (e.g., STIM300: 0.15 deg/√h)
+        # Meaning: after integrating for time t, angle error std = ARW × √(t in hours)
         ARW_deg = float(config["sensors"]["gyro"]["noise"]["arw_deg"])
 
-        # continuous-time angle random-walk density [rad/√s]
-        self.noise_rw = ARW_deg * np.pi / 180.0 / np.sqrt(3600.0)
+        # Convert to continuous-time noise density [rad/√s]
+        # σ_g such that σ_angle = σ_g × √(t in seconds)
+        # ARW [deg/√h] → σ_g [rad/√s]: multiply by (π/180) and divide by √3600 = 60
+        self.sigma_g = ARW_deg * (np.pi / 180.0) / 60.0
 
-        # this is the continuous-time driving noise for δθ
-        self.sigma_g = self.noise_rw
+        # ---- Rate Random Walk (bias drift) ----
+        # RRW in deg/h/√h from datasheet or estimated (e.g., STIM300: ~0.5 deg/h/√h)
+        # Meaning: after time t, bias std = RRW × √(t in hours) [deg/h]
+        RRW_deg = float(config["sensors"]["gyro"]["noise"]["rrw_deg"])
 
-        # ---- bias random walk from bias instability (if provided) ----
-        # bias_instability_deg_per_h should be in deg/h (1σ)
-        bias_cfg = config["sensors"]["gyro"]["noise"].get("bias_instability_deg_per_h", None)
-        BI_deg_per_h = float(bias_cfg)
-        # convert to rad/s (1σ change over 1 h)
-        b_inst = BI_deg_per_h * np.pi / 180.0 / 3600.0  # rad/s
-        # random-walk density σ_bg so that σ_bg * sqrt(3600) ≈ b_inst
-        self.sigma_bg = b_inst / np.sqrt(3600.0)
-        
+        # Convert to continuous-time noise density [rad/s/√s]
+        # σ_bg such that σ_bias = σ_bg × √(t in seconds) [rad/s]
+        # RRW [deg/h/√h] → σ_bg [rad/s/√s]:
+        #   - deg/h to rad/s: multiply by (π/180)/3600
+        #   - 1/√h to 1/√s: divide by √3600 = 60
+        self.sigma_bg = RRW_deg * (np.pi / 180.0) / 3600.0 / 60.0
+
+        # ---- Discrete gyro sample noise ----
+        # For sampling at interval dt, per-sample std = σ_g / √dt
+        gyro_dt = float(config["sensors"]["gyro"]["dt"])
+        self.gyro_std = self.sigma_g / np.sqrt(gyro_dt)
+
+        # ---- Process noise scaling factor ----
+        # Allows tuning filter confidence without changing physical gyro specs
+        self.noise_scale = float(config["sensors"]["gyro"].get("noise_scale", 1.0))
+
         logger.info(f"ProcessModel initialized with σ_g={self.sigma_g:.6e} rad/√s, "
-                     f"σ_bg={self.sigma_bg:.6e} rad/s/√s")
+                    f"σ_bg={self.sigma_bg:.6e} rad/s/√s, gyro_std={self.gyro_std:.6e} rad/s")
    
 
 
     @property
     def Q_c(self) -> np.ndarray:
         """Continuous-time process noise covariance Q_c (6x6)."""
-        Qg  = (self.sigma_g  ** 2) * np.eye(3)  # attitude / rate driving noise
-        Qbg = (self.sigma_bg ** 2) * np.eye(3)  # bias random-walk driving noise
+        # Apply noise scaling to prevent filter over-confidence
+        Qg  = (self.sigma_g  ** 2) * self.noise_scale * np.eye(3)  # attitude / rate driving noise
+        Qbg = (self.sigma_bg ** 2) * self.noise_scale * np.eye(3)  # bias random-walk driving noise
         return np.block([
             [Qg,                np.zeros((3, 3))],
             [np.zeros((3, 3)),  Qbg            ],
