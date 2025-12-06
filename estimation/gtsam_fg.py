@@ -177,7 +177,9 @@ class GtsamFGO:
         self.sigma_g = self.process.sigma_g      # rad / sqrt(s)
         self.sigma_bg = self.process.sigma_bg    # rad/s / sqrt(s)
 
-        self.sigma_mag = self.config["sensors"]["mag"]["mag_std"]               # for mag + sun (unit-vector error)
+        # Magnetometer noise inflated to account for unmodeled hard-iron bias
+        mag_bias_inflation = self.config["sensors"]["mag"].get("fgo_noise_inflation", 10.0)
+        self.sigma_mag = self.config["sensors"]["mag"]["mag_std"] * mag_bias_inflation
         self.sigma_sv = self.config["sensors"]["sun"]["noise"]["sun_std"]                 # for sun sensor
         self.sigma_st = self.config["sensors"]["star"]["noise"]["st_std"]                 # for star-tracker
         self.max_iters = max_iters
@@ -443,9 +445,9 @@ class GtsamFGO:
         prior_R_noise = gtsam.noiseModel.Diagonal.Sigmas(
             np.array([0.01, 0.01, 0.01])
         )
-        # Prior bias uncertainty: ~1e-3 rad/s
+        # Prior bias uncertainty: ~1e-5 rad/s (tight to prevent mag bias absorption)
         prior_b_noise = gtsam.noiseModel.Diagonal.Sigmas(
-            np.array([1e-3, 1e-3, 1e-3])
+            np.array([1e-5, 1e-5, 1e-5])
         )
         graph.add(gtsam.PriorFactorRot3(self.X(0), R0, prior_R_noise))
         graph.add(gtsam.PriorFactorPoint3(self.B(0), b0_pt, prior_b_noise))
@@ -497,6 +499,14 @@ class GtsamFGO:
                     dt=dt,
                 )
             )
+
+            # Add zero-bias prior to prevent mag bias absorption into gyro bias
+            # This anchors bias throughout the window, not just at first node
+            graph.add(gtsam.PriorFactorPoint3(
+                self.B(i),
+                gtsam.Point3(0.0, 0.0, 0.0),
+                gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-4, 1e-4, 1e-4]))
+            ))
 
             # Measurement factors
             r_eci = env.get_r_eci(sc.jd)

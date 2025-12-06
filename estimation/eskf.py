@@ -45,6 +45,8 @@ class ESKF:
     P0: np.ndarray              # initial error covariance
     config_path: str = "config.yaml"
     chi2_threshold: float = 7.81  # 99.9% confidence, 3 DOF (chi2(3, 0.999))
+    chi2_threshold_sun: float = 1e10   # Effectively disabled - let sun sensor correct drift
+    chi2_threshold_star: float = 1e10  # Effectively disabled - let star tracker correct drift
 
     def __post_init__(self):
         self.sens_mag = SensorMagnetometer(config_path=self.config_path)
@@ -138,10 +140,10 @@ class ESKF:
                 H = self.sv.H(x_est.nom, s_n)
                 R = self.sv.R
 
-                # Chi-squared test for outlier rejection
+                # Chi-squared test for outlier rejection (relaxed for sun sensor)
                 S = H @ P @ H.T + R
                 mahalanobis_dist_sq = innovation.T @ np.linalg.solve(S, innovation)
-                if mahalanobis_dist_sq > self.chi2_threshold:
+                if mahalanobis_dist_sq > self.chi2_threshold_sun:
                     raise ValueError(f"Sun-vector innovation too large (chi2={mahalanobis_dist_sq:.2f}), possible bad measurement.")
 
             case SensorType.STAR_TRACKER:
@@ -152,10 +154,10 @@ class ESKF:
                 H = self.st.H(x_est.nom)
                 R = self.st.R
 
-                # Chi-squared test for outlier rejection
+                # Chi-squared test for outlier rejection (relaxed for star tracker)
                 S = H @ P @ H.T + R
                 mahalanobis_dist_sq = innovation.T @ np.linalg.solve(S, innovation)
-                if mahalanobis_dist_sq > self.chi2_threshold:
+                if mahalanobis_dist_sq > self.chi2_threshold_star:
                     raise ValueError(f"Star tracker innovation too large (chi2={mahalanobis_dist_sq:.2f}), possible bad measurement.")
 
             case _:

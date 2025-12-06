@@ -66,15 +66,17 @@ class AttitudePlotter:
         """
         sim_result = self.db.load_run(sim_run_id)
         est_result = self._load_estimation_run(est_run_id)
-        cutoff = len(est_result.t)  # in case est shorter than sim
 
-        t_true = sim_result.t[:cutoff]
-        t_est  = est_result.t
-        if len(t_true) != len(t_est) or not np.allclose(t_true, t_est):
-            raise ValueError("Time grids of simulation and estimation differ; interpolate first.")
+        # Match estimation times to simulation times via nearest index
+        t_est = est_result.t
+        q_est = est_result.q_est
 
-        q_true = sim_result.q_true[:cutoff]
-        q_est  = est_result.q_est
+        # Find corresponding simulation indices for each estimation time
+        sim_indices = np.searchsorted(sim_result.t, t_est, side='left')
+        sim_indices = np.clip(sim_indices, 0, len(sim_result.t) - 1)
+
+        t_true = sim_result.t[sim_indices]
+        q_true = sim_result.q_true[sim_indices]
 
         e_true = self._quat_seq_to_euler(q_true) * 180.0 / np.pi
         e_est  = self._quat_seq_to_euler(q_est) * 180.0 / np.pi
@@ -116,15 +118,17 @@ class AttitudePlotter:
         """
         sim_result = self.db.load_run(sim_run_id)
         est_result = self._load_estimation_run(est_run_id)
-        cutoff = len(est_result.t)  # in case est shorter than sim
 
-        t_true = sim_result.t[:cutoff]
+        # Match estimation times to simulation times via nearest index
         t_est = est_result.t
-        if len(t_true) != len(t_est) or not np.allclose(t_true, t_est):
-            raise ValueError("Time grids of simulation and estimation differ; interpolate first.")
+        q_est = est_result.q_est
 
-        q_true = sim_result.q_true[:cutoff]
-        q_est  = est_result.q_est
+        # Find corresponding simulation indices for each estimation time
+        sim_indices = np.searchsorted(sim_result.t, t_est, side='left')
+        sim_indices = np.clip(sim_indices, 0, len(sim_result.t) - 1)
+
+        t_true = sim_result.t[sim_indices]
+        q_true = sim_result.q_true[sim_indices]
 
         angle_err_rad = self._quat_angle_error(q_true, q_est)
         angle_err_deg = angle_err_rad * 180.0 / np.pi
@@ -194,14 +198,18 @@ class AttitudePlotter:
 
         sim_result = self.db.load_run(sim_run_id)
         est_result = self._load_estimation_run(est_run_id)
-        cutoff = len(est_result.t)
 
         t = est_result.t
-        q_true = sim_result.q_true[:cutoff]
         q_est = est_result.q_est
-        b_true = sim_result.b_g_true[:cutoff]
         b_est = est_result.bg_est
         P_est = est_result.P_est  # (N, 6, 6)
+
+        # Find corresponding simulation indices for each estimation time
+        sim_indices = np.searchsorted(sim_result.t, t, side='left')
+        sim_indices = np.clip(sim_indices, 0, len(sim_result.t) - 1)
+
+        q_true = sim_result.q_true[sim_indices]
+        b_true = sim_result.b_g_true[sim_indices]
 
         N = len(t)
         n = 6  # State dimension (3 attitude + 3 bias)
@@ -294,6 +302,77 @@ class AttitudePlotter:
         else:
             print(f"  ✓ Filter appears consistent")
 
+    def plot_bias_error(self, sim_run_id: int, est_run_id: int, fname: str | None = None,
+                        steady_state_start: float = 20.0):
+        """
+        Plot gyro bias estimation error with 3σ confidence bounds.
+
+        Args:
+            sim_run_id: Simulation run ID
+            est_run_id: Estimation run ID
+            fname: Optional filename prefix for saving plots
+            steady_state_start: Time (s) after which to show (default: 20s)
+        """
+        sim = self.db.load_run(sim_run_id)
+        est = self._load_estimation_run(est_run_id)
+
+        t = est.t
+        b_est = est.bg_est         # (N, 3)
+        P_est = est.P_est          # (N, 6, 6)
+
+        # Find corresponding simulation indices for each estimation time
+        sim_indices = np.searchsorted(sim.t, t, side='left')
+        sim_indices = np.clip(sim_indices, 0, len(sim.t) - 1)
+        b_true = sim.b_g_true[sim_indices]  # (N, 3)
+
+        # Find steady-state start index
+        ss_idx = np.searchsorted(t, steady_state_start)
+        t = t[ss_idx:]
+        b_true = b_true[ss_idx:]
+        b_est = b_est[ss_idx:]
+        P_est = P_est[ss_idx:]
+
+        # Bias error
+        b_err = b_est - b_true     # (N, 3) in rad/s
+
+        # 3σ bounds from covariance (indices 3:6 are bias)
+        sigma_b = np.sqrt(np.array([P_est[k, 3:6, 3:6].diagonal() for k in range(len(t))]))
+        bounds_3sigma = 3 * sigma_b
+
+        # Convert to deg/s
+        b_err_deg_s = np.rad2deg(b_err)
+        bounds_3sigma_deg_s = np.rad2deg(bounds_3sigma)
+
+        axis_labels = ['X', 'Y', 'Z']
+        colors = ['C0', 'C1', 'C2']
+
+        # Single plot with all 3 axes
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        for i in range(3):
+            ax.fill_between(t, -bounds_3sigma_deg_s[:, i], bounds_3sigma_deg_s[:, i],
+                           alpha=0.2, color=colors[i])
+            ax.plot(t, b_err_deg_s[:, i], colors[i], linewidth=1,
+                   label=f'{axis_labels[i]}-axis')
+
+        ax.axhline(0, color='k', linestyle='--', linewidth=0.5)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Bias Error [deg/s]')
+        ax.set_title('Gyro Bias Estimation Error - Steady State (with ±3σ bounds)')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if fname is not None:
+            fig.savefig(fname + ".pdf", bbox_inches="tight")
+            fig.savefig(fname + ".png", dpi=400, bbox_inches="tight")
+        plt.show()
+
+        # Print summary
+        print(f"\nBias Estimation Summary:")
+        print(f"  Final bias error (deg/s): [{b_err_deg_s[-1, 0]:.6f}, {b_err_deg_s[-1, 1]:.6f}, {b_err_deg_s[-1, 2]:.6f}]")
+        print(f"  Final 3σ bounds (deg/s):  [{bounds_3sigma_deg_s[-1, 0]:.6f}, {bounds_3sigma_deg_s[-1, 1]:.6f}, {bounds_3sigma_deg_s[-1, 2]:.6f}]")
 
     def plot_euler_kf_vs_fgo(
         self,

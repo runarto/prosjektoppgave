@@ -197,6 +197,14 @@ def generate_plots(sim_run_id: int, est_run_id: int, db_path: str = "simulations
         fname="euler_comparison"
     )
 
+    # 5. Gyro bias estimation error
+    print("\n5. Gyro bias estimation error...")
+    plotter.plot_bias_error(
+        sim_run_id=sim_run_id,
+        est_run_id=est_run_id,
+        fname="bias_error"
+    )
+
     print("\n" + "=" * 70)
     print("ALL PLOTS GENERATED SUCCESSFULLY!")
     print("=" * 70)
@@ -205,12 +213,13 @@ def generate_plots(sim_run_id: int, est_run_id: int, db_path: str = "simulations
     print("  - attitude_error_split.pdf/png    (convergence + steady-state)")
     print("  - nees_analysis.pdf/png           (filter consistency check)")
     print("  - euler_comparison.pdf/png        (roll, pitch, yaw)")
+    print("  - bias_error.pdf/png              (gyro bias estimation)")
 
 
 def main():
     """Run complete pipeline: ESKF estimation + enhanced plotting."""
     # Configuration
-    sim_run_id = 1  # Change this to your simulation run ID
+    sim_run_id = 1  # Use run with STIM300 parameters
     db_path = "simulations.db"
     config_path = "configs/config_baseline_short.yaml"
 

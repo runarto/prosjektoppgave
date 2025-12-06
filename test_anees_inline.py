@@ -15,7 +15,7 @@ from estimation.eskf import ESKF
 
 def main():
     db = SimulationDatabase('simulations.db')
-    sim = db.load_run(2)  # Use latest run with STIM300 parameters
+    sim = db.load_run(1)  # Use latest run with STIM300 parameters
 
     # Check current R values being used
     P0 = np.diag([0.001, 0.001, 0.001, 1e-4, 1e-4, 1e-4])

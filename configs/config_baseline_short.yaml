@@ -9,44 +9,22 @@ sensors:
     noise:
       # STIM300 specifications (from Safran datasheet)
       arw_deg: 0.15         # Angle Random Walk [deg/√h]
-      rrw_deg: 0.5          # Rate Random Walk [deg/h/√h] (estimated ≈ bias instability)
+      rrw_deg: 0.5          # Rate Random Walk [deg/h/√h] 
     scaling:
       noise_scale: 1.0
   mag:
-    mag_std: 1.0e-3
-    dt: 0.1
-    bias_rw_std: 1.0e-09
-    bias_init:
-    - 1.0e-08
-    - 1.0e-08
-    - 1.0e-08
-    hard_iron:
-    - 0.0
-    - 0.0
-    - 0.0
-    soft_iron:
-    - - 1.0
-      - 0.0
-      - 0.0
-    - - 0.0
-      - 1.0
-      - 0.0
-    - - 0.0
-      - 0.0
-      - 1.0
+    mag_std: 3.3e-4
+    dt: 0.2
+    # Hard-iron bias: residual after calibration (~1% of unit vector)
+    # Represents spacecraft-induced magnetic field offsets
+    hard_iron: [0.008, -0.005, 0.006]
     spikes:
       enabled: false
   sun:
-    dt: 1.0
+    dt: 2.0
     fov_deg: 120.0
-    bias:
-      rw_std: 1.0e-09
-      init:
-      - 1.0e-07
-      - 1.0e-07
-      - 1.0e-07
     noise:
-      sun_std: 1.0e-04
+      sun_std: 5.2e-03
     dropout:
       probability: 0.0
       use_measurements: true
@@ -55,9 +33,9 @@ sensors:
     scaling:
       noise_scale: 1.0
   star:
-    dt: 0.5
+    dt: 5.0
     noise:
-      st_std: 5.0e-06
+      st_std: 2.4e-05
     bias:
       rw_std: 1.0e-10
       init:

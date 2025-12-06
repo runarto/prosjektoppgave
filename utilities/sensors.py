@@ -59,7 +59,7 @@ class SensorMagnetometer:
         self.spike_probability: float = spikes_cfg.get("probability", 0.0)
 
         # Set measurement noise covariance R = sigma^2 * I
-        self.R = np.eye(3) * self.mag_std**2
+        self.R = np.eye(3) * self.mag_std**2 
         logger.debug(f"Magnetometer measurement noise covariance R set to {self.mag_std**2:.2e} * I")
 
     # ---- internal helpers -------------------------------------------------
@@ -103,8 +103,10 @@ class SensorMagnetometer:
         R_bn = R_nb.T               # nav-to-body
         B_b = R_bn @ B_n            # true field in body frame
 
-        # NO hard- and soft-iron effects per user requirement (no bias, only noise)
-        z_ideal = B_b
+        # Apply hard-iron and soft-iron effects (calibration errors)
+        # Hard-iron: additive bias in body frame
+        # Soft-iron: scale/axis misalignment (multiplicative)
+        z_ideal = self.soft_iron @ B_b + self.hard_iron
 
         # Add white measurement noise
         noise = np.random.normal(0.0, self.mag_std, size=3)
