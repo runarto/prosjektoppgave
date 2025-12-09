@@ -139,9 +139,13 @@ class Quaternion:
     def propagate(self, omega: np.ndarray, dt: float):
         """
         Propagate quaternion given the angular velocity over time dt,
-        using the expoential map. Uses left-multiplication convention.
-        I.e. q_new = delta_q ⊗ q_old, where delta_q is built from omega*dt.
-        omega : angular velocity vector (3,)
+        using the exponential map. Uses right-multiplication convention.
+
+        I.e. q_new = q_old ⊗ delta_q, where delta_q is built from omega*dt.
+        This is the GTSAM/robotics convention where omega is in body frame
+        and perturbations are applied on the right (local/body frame).
+
+        omega : angular velocity vector in body frame (3,)
         dt    : time step (float)
         """
         omega = np.asarray(omega, float).reshape(3)
@@ -152,5 +156,66 @@ class Quaternion:
             theta = norm_omega * dt
             axis = omega / norm_omega
             delta_q = Quaternion(np.cos(theta/2.0), axis * np.sin(theta/2.0))
-        q_new = delta_q.multiply(self)
+        q_new = self.multiply(delta_q)  # right multiply
         return q_new._canonical()
+
+    def propagate_rk4(self, omega_start: np.ndarray, omega_end: np.ndarray, dt: float):
+        """
+        Propagate quaternion using RK4 integration for time-varying angular velocity.
+
+        This is more accurate than simple exponential map when omega changes during dt.
+        Uses the quaternion kinematics: q_dot = 0.5 * q ⊗ [0, omega]
+
+        Uses right-multiplication convention (body-frame perturbation).
+
+        Args:
+            omega_start: Angular velocity at start of interval (body frame)
+            omega_end: Angular velocity at end of interval (body frame)
+            dt: Time step
+
+        Returns:
+            Propagated quaternion
+        """
+        omega_start = np.asarray(omega_start, float).reshape(3)
+        omega_end = np.asarray(omega_end, float).reshape(3)
+
+        def q_dot(q: 'Quaternion', omega: np.ndarray) -> np.ndarray:
+            """Quaternion derivative: q_dot = 0.5 * q ⊗ [0, omega]"""
+            omega_quat = Quaternion(0.0, omega)
+            dq = q.multiply(omega_quat)
+            return 0.5 * np.array([dq.mu, dq.eta[0], dq.eta[1], dq.eta[2]])
+
+        def array_to_quat(arr: np.ndarray) -> 'Quaternion':
+            return Quaternion(arr[0], arr[1:4])
+
+        def quat_to_array(q: 'Quaternion') -> np.ndarray:
+            return np.array([q.mu, q.eta[0], q.eta[1], q.eta[2]])
+
+        # Interpolate omega for midpoint
+        omega_mid = 0.5 * (omega_start + omega_end)
+
+        q_arr = quat_to_array(self)
+
+        # RK4 stages
+        k1 = q_dot(self, omega_start)
+        k2 = q_dot(array_to_quat(q_arr + 0.5 * dt * k1).normalize(), omega_mid)
+        k3 = q_dot(array_to_quat(q_arr + 0.5 * dt * k2).normalize(), omega_mid)
+        k4 = q_dot(array_to_quat(q_arr + dt * k3).normalize(), omega_end)
+
+        # Combine
+        q_new_arr = q_arr + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        q_new = Quaternion(q_new_arr[0], q_new_arr[1:4])
+        return q_new.normalize()._canonical()
+    
+    def __matmut__(self, other):
+        """Opertaional overload for @ operator as quaternion multiplication."""
+        return self.multiply(other)
+    
+    def __str__(self):
+        """String representation."""
+        return f"Quaternion(mu={self.mu}, eta={self.eta})"
+    
+    def __repr__(self):
+        """Official string representation."""
+        return self.__str__()
+

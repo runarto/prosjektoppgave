@@ -109,14 +109,16 @@ class EskfState:
 
         This updates the nominal state by applying the error, and resets
         the error state mean to zero. The covariance remains unchanged.
+
+        Uses right-multiply convention: q_new = q_nom ⊗ δq (body-frame perturbation)
         """
         delta_x = np.asarray(delta_x, float).reshape(6)
         delta_avec = delta_x[0:3]
         delta_gyro_bias = delta_x[3:6]
 
-        # 1) Update nominal orientation: q_new = δq ⊗ q_nom
+        # 1) Update nominal orientation: q_new = q_nom ⊗ δq (right-multiply)
         delta_q = Quaternion.from_avec(avec=delta_avec)
-        self.nom.ori = delta_q.multiply(self.nom.ori)
+        self.nom.ori = self.nom.ori.multiply(delta_q)
 
         # 2) Update nominal gyro bias (additive)
         self.nom.gyro_bias += delta_gyro_bias

@@ -154,13 +154,13 @@ def run_fgo_and_save(sim_run_id: int, db_path: str = "simulations.db",
     print(f"  Star tracker: {n_st_used} used")
     print(f"  Total optimizations: {n_optimizations}")
 
-    # Compute final error
+    # Compute final error - right-multiply: q_err = q_true ⊗ q_est^{-1}
     if len(est_states) > 0:
         # Find matching true state for final estimate
         final_idx = len(est_states) - 1
         q_true_final = Quaternion.from_array(sim.q_true[final_idx])
         q_est_final = est_states[-1].ori
-        q_err = q_true_final.conjugate().multiply(q_est_final)
+        q_err = q_true_final.multiply(q_est_final.conjugate())
         angle_err = 2 * np.arccos(np.clip(abs(q_err.mu), 0, 1))
         print(f"\nFinal attitude error: {np.rad2deg(angle_err):.4f} deg")
 

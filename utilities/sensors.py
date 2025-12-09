@@ -119,36 +119,31 @@ class SensorMagnetometer:
     # ---- ESKF-related methods --------------------------------------------
 
     def H(self, x_nom: NominalState, B_n: np.ndarray) -> np.ndarray:
-        """Jacobian wrt error state.
+        """Jacobian wrt error state for right-multiply (GTSAM) convention.
 
-        Measurement model used by the filter (ideal, calibrated magnetometer):
+        Measurement model:
+            z = R_bn · B_n  (rotate reference vector from nav to body)
 
-            z = S (R_bn B_n + h_HI)
+        For right-multiply perturbation q = q_nom ⊗ δq (body-frame):
+            R_bn_true = (I - [δθ]×) · R_bn_nom
 
-        with S = soft_iron, h_HI = hard_iron.
+        So:
+            z_true = (I - [δθ]×) · R_bn · B_n
+                   = z_nom - [δθ]× · z_nom
+                   = z_nom + [z_nom]× · δθ  (using -[a]× b = [b]× a)
 
-        With attitude error δθ in body frame and
-            R_bn_true ≈ (I + [δθ×]) R_bn,
-        we have:
-            z_true = R_bn_true · B_n ≈ (I + [δθ×]) R_bn · B_n
-                   = R_bn · B_n + [δθ×] · B_b
-                   = z_nom + [δθ×] · B_b
-
-        Using [a]× · b = -[b]× · a:
-            δz = z_true - z_nom ≈ [δθ×] · B_b = -[B_b]× · δθ
-
-        so:
-            ∂z/∂(δθ) = -[B_b]×
+        Therefore:
+            ∂z/∂(δθ) = [z_nom]× = [B_b]× = skew(B_b)
         """
         B_n = np.asarray(B_n, float).reshape(3)
 
         R_nb = x_nom.ori.as_rotmat()
         R_bn = R_nb.T
 
-        B_b = R_bn @ B_n  # field in body frame before iron effects
+        B_b = R_bn @ B_n  # predicted measurement in body frame
 
         H = np.zeros((3, 6))
-        H[0:3, 0:3] = R_bn @ get_skew_matrix(B_n)  # REVERTED: Original sign
+        H[0:3, 0:3] = get_skew_matrix(B_b)  # Right-multiply: +[B_b]×
         return H
 
     def pred_from_est(self, x_est: EskfState, B_n: np.ndarray) -> MultiVarGauss[np.ndarray]:
@@ -298,20 +293,20 @@ class SensorSunVector:
     # ---- ESKF related methods (unchanged interface) -----------------------
 
     def H(self, x_nom: NominalState, s_n: np.ndarray) -> np.ndarray:
-        """Jacobian wrt 6D error state [δθ; δb_g].
+        """Jacobian wrt 6D error state [δθ; δb_g] for right-multiply convention.
 
-        Same derivation as magnetometer:
-            δz = -[s_b]× · δθ
+        Same derivation as magnetometer (GTSAM/right-multiply):
+            z_true = z_nom + [z_nom]× · δθ
         so:
-            ∂z/∂(δθ) = -[s_b]×
+            ∂z/∂(δθ) = [s_b]× = skew(s_b)
         """
         s_n = np.asarray(s_n, float).reshape(3)
         R_nb = x_nom.ori.as_rotmat()
         R_bn = R_nb.T
-        z_pred = R_bn @ s_n
+        s_b = R_bn @ s_n  # predicted measurement in body frame
 
         H = np.zeros((3, 6))
-        H[0:3, 0:3] = R_bn @ get_skew_matrix(s_n)  # REVERTED: Original sign
+        H[0:3, 0:3] = get_skew_matrix(s_b)  # Right-multiply: +[s_b]×
         return H
 
     def pred_from_est(self, x_est: EskfState, s_n: np.ndarray) -> MultiVarGauss[np.ndarray]:
@@ -324,7 +319,7 @@ class SensorSunVector:
         z_pred = R_bn @ s_n
 
         H = self.H(x_nom, s_n)
-        S = -H @ x_est.err.cov @ H.T + self.R
+        S = H @ x_est.err.cov @ H.T + self.R  # Fixed: removed spurious negative
 
         return MultiVarGauss(mean=z_pred, cov=S)
 
@@ -456,7 +451,8 @@ class SensorStarTracker:
             eta = axis * np.sin(half_angle)
             q_error = Quaternion(mu, eta)
 
-        return q_error.multiply(q_true)
+        # Right-multiply: q_meas = q_true ⊗ q_error (body-frame perturbation)
+        return q_true.multiply(q_error)
 
     # ---------- ESKF interface (unchanged) ----------
 
@@ -467,8 +463,11 @@ class SensorStarTracker:
         return H
 
     def quat_error(self, q_nom: Quaternion, q_meas: Quaternion) -> np.ndarray:
-        """Map quaternion difference to small-angle error δθ."""
+        """Map quaternion difference to small-angle error δθ.
 
+        Right-multiply convention: q_meas = q_nom ⊗ δq
+        Therefore: δq = q_nom^{-1} ⊗ q_meas
+        """
         arr_nom = q_nom.as_array()
         arr_meas = q_meas.as_array()
 
@@ -477,8 +476,8 @@ class SensorStarTracker:
             arr_meas = -arr_meas
             q_meas = Quaternion(arr_meas[0], arr_meas[1:4])
 
-        # Error quaternion: δq = q_meas ⊗ q_nom^{-1}
-        q_err = q_meas.multiply(q_nom.conjugate())
+        # Error quaternion: δq = q_nom^{-1} ⊗ q_meas (right-multiply convention)
+        q_err = q_nom.conjugate().multiply(q_meas)
         return 2.0 * q_err.eta
 
     def pred_from_est(self, x_est: EskfState, q_meas: Quaternion) -> MultiVarGauss[np.ndarray]:

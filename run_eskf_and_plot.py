@@ -44,9 +44,9 @@ def run_eskf_and_save(sim_run_id: int, db_path: str = "simulations.db",
     P0 = np.diag([0.001, 0.001, 0.001, 1e-4, 1e-4, 1e-4])
     eskf = ESKF(P0=P0, config_path=config_path)
 
-    # Initial state (with some error)
+    # Initial state (with some error) - right-multiply convention
     q0_true = Quaternion.from_array(sim.q_true[0])
-    q0_est = Quaternion.from_avec(np.array([0.01, 0.01, 0.01])).multiply(q0_true).normalize()
+    q0_est = q0_true.multiply(Quaternion.from_avec(np.array([0.01, 0.01, 0.01]))).normalize()
     b0_est = np.zeros(3)
 
     nom0 = NominalState(ori=q0_est, gyro_bias=b0_est)
@@ -125,10 +125,10 @@ def run_eskf_and_save(sim_run_id: int, db_path: str = "simulations.db",
     print(f"  Sun sensor:   {accepted_count['sun']} accepted, {rejected_count['sun']} rejected")
     print(f"  Star tracker: {accepted_count['star']} accepted, {rejected_count['star']} rejected")
 
-    # Compute final error
+    # Compute final error - right-multiply: q_err = q_true^{-1} ⊗ q_est
     q_true_final = Quaternion.from_array(sim.q_true[-1])
     q_est_final = states[-1].nom.ori
-    q_err = q_true_final.conjugate().multiply(q_est_final)
+    q_err = q_true_final.multiply(q_est_final.conjugate())
     angle_err = 2 * np.arccos(np.clip(abs(q_err.mu), 0, 1))
     print(f"\nFinal attitude error: {np.rad2deg(angle_err):.4f}°")
 
