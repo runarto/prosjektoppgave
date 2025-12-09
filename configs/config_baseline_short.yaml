@@ -13,18 +13,18 @@ sensors:
     scaling:
       noise_scale: 1.0
   mag:
-    mag_std: 3.3e-4
+    mag_std: 0.015
     dt: 0.2
     # Hard-iron bias: residual after calibration (~1% of unit vector)
     # Represents spacecraft-induced magnetic field offsets
-    hard_iron: [0.008, -0.005, 0.006]
+    hard_iron: [0.0, 0.0, 0.0]
     spikes:
       enabled: false
   sun:
     dt: 2.0
     fov_deg: 120.0
     noise:
-      sun_std: 5.2e-03
+      sun_std: 0.027
     dropout:
       probability: 0.0
       use_measurements: true
@@ -35,13 +35,7 @@ sensors:
   star:
     dt: 5.0
     noise:
-      st_std: 2.4e-05
-    bias:
-      rw_std: 1.0e-10
-      init:
-      - 1.0e-08
-      - 1.0e-08
-      - 1.0e-08
+      st_std: 0.00024
     dropout:
       probability: 0.05
       use_measurements: true

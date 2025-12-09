@@ -10,7 +10,6 @@ from utilities.states import EskfState, SensorType
 from utilities.quaternion import Quaternion
 from utilities.process_model import ProcessModel
 from utilities.sensors import SensorGyro, SensorMagnetometer, SensorStarTracker, SensorSunVector
-from data.db import SimulationDatabase
 
 logger = get_logger(__name__)
 

@@ -487,6 +487,71 @@ class KeyframeFGO:
         else:
             return self._process_simulation_batch(sim_data, env)
 
+    def interpolate_full_rate(
+        self,
+        keyframe_times: List[float],
+        keyframe_states: List[NominalState],
+        sim_data,
+    ) -> Tuple[List[float], List[NominalState]]:
+        """
+        Interpolate between keyframes to get full-rate estimates.
+
+        Uses optimized bias from keyframes and propagates attitude using gyro
+        measurements between keyframes.
+
+        Args:
+            keyframe_times: Times of keyframe estimates
+            keyframe_states: Estimated states at keyframes
+            sim_data: Original simulation data with gyro measurements
+
+        Returns:
+            Tuple of (all_times, all_states) at full gyro rate
+        """
+        all_times = []
+        all_states = []
+
+        kf_idx = 0
+        current_state = keyframe_states[0]
+
+        for k in range(len(sim_data.t)):
+            t = sim_data.t[k]
+
+            # Check if we've reached the next keyframe
+            if kf_idx + 1 < len(keyframe_times) and t >= keyframe_times[kf_idx + 1] - 1e-6:
+                kf_idx += 1
+                current_state = keyframe_states[kf_idx]
+
+            if k == 0:
+                # First sample - use initial keyframe state
+                all_times.append(t)
+                all_states.append(NominalState(
+                    ori=current_state.ori.copy(),
+                    gyro_bias=current_state.gyro_bias.copy(),
+                ))
+            else:
+                # Propagate from previous state using gyro
+                dt = sim_data.t[k] - sim_data.t[k-1]
+                omega = sim_data.omega_meas[k]
+
+                if np.any(np.isnan(omega)):
+                    omega = sim_data.omega_meas[k-1] if k > 0 else np.zeros(3)
+
+                # Use bias from current keyframe
+                omega_corrected = omega - current_state.gyro_bias
+
+                # Propagate attitude (right-multiply convention)
+                q_new = all_states[-1].ori.propagate(omega_corrected, dt)
+
+                all_times.append(t)
+                all_states.append(NominalState(
+                    ori=q_new,
+                    gyro_bias=current_state.gyro_bias.copy(),
+                ))
+
+        logger.info(f"Interpolated {len(keyframe_states)} keyframes to {len(all_states)} full-rate estimates")
+
+        return all_times, all_states
+
     def _get_kf_estimate_at_time(self, t: float) -> Optional[NominalState]:
         """Get interpolated KF estimate at time t."""
         if self.kf_estimates is None:
@@ -742,7 +807,7 @@ class KeyframeFGO:
         # Initial attitude
         q0 = Quaternion.from_array(sim_data.q_true[0])
         # Perturb initial attitude - right-multiply convention
-        q0 = q0.multiply(Quaternion.from_avec(np.array([0.1, 0.1, 0.1])))
+        q0 = q0.multiply(Quaternion.from_avec(np.array([np.pi, np.pi, np.pi])))
         R0 = rot3_from_quat(q0)
 
         # First keyframe

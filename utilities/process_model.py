@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
-
+import scipy.linalg
 from utilities.states import NominalState
 from utilities.utils import get_skew_matrix, load_yaml
 
@@ -26,13 +26,8 @@ class ProcessModel:
         n_g   ~ N(0, σ_g^2 I_3)
         w_bg  ~ N(0, σ_bg^2 I_3)
 
-    Standard second and third-order discrete-time approximation (small Δt):
-
-        F ≈ I + A Δt + 0.5 A² Δt²
-        Q_d = exp(F) G Q_c Gᵀ ≈ Q_c Δt
-              + 0.5 (A Q_c + Q_c Aᵀ) Δt²
-              + 1/3 A Q_c Aᵀ Δt³
-        G = I
+    Uses scipy.linalg.expm to compute discrete-time state transition matrix F and
+    Van Loan's method to compute discrete-time process noise covariance Q_d.
 
     Covariance prediction:
 
@@ -119,29 +114,32 @@ class ProcessModel:
 
     @classmethod
     def F(cls, x_nom: NominalState, omega_meas: np.ndarray, dt: float) -> np.ndarray:
-        """Second–order discrete-time state transition F ≈ I + A dt + 0.5 A^2 dt^2."""
-        A = cls.A(x_nom, omega_meas)           # (6,6)
-        A2 = A @ A
-        return np.eye(6) + A * dt + 0.5 * A2 * dt**2
+        """Uses scipy.linalg.expm to compute discrete-time state transition matrix F."""
+        return scipy.linalg.expm(cls.A(x_nom, omega_meas) * dt)
 
 
     def Q_d(self, x_nom: NominalState, omega_meas: np.ndarray, dt: float) -> np.ndarray:
         """
-        Higher-order discrete-time process covariance.
+        Uses Van Loan's method to compute the discrete-time process noise covariance Q_d:
 
-        Q_d ≈ Q_c dt
-            + 0.5 (A Q_c + Q_c A^T) dt^2
-            + 1/3 A Q_c A^T dt^3
+            Q_d = ∫₀^Δt exp(A τ) G Q_c Gᵀ exp(Aᵀ τ) dτ
         """
-        A = self.A(x_nom, omega_meas)          # same A as in F
-        Qc = self.Q_c
+        n = self.Q_c.shape[0]
+        A = self.A(x_nom, omega_meas)
+        GQG_T = self.G() @ self.Q_c @ self.G().T
 
-        term1 = Qc * dt
-        term2 = 0.5 * (A @ Qc + Qc @ A.T) * dt**2
-        term3 = (1.0 / 3.0) * (A @ Qc @ A.T) * dt**3
+        # Construct the Van Loan matrix
+        VanLoan = np.block([
+            [-A,           GQG_T],
+            [np.zeros((n, n)), A.T]
+        ]) * dt
 
-        return term1 + term2 + term3
+        # Compute the matrix exponential
+        exp_VL = scipy.linalg.expm(VanLoan)
 
+        # Extract Q_d from the top-right block
+        Q_d = exp_VL[0:n, n:2*n]
+        return Q_d
 
     def propagate_covariance(self,
                              P: np.ndarray,
