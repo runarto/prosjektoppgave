@@ -43,6 +43,42 @@ class Quaternion:
     def copy(self):
         return Quaternion(self.mu, self.eta)._canonical()
 
+    def slerp(self, other: 'Quaternion', t: float) -> 'Quaternion':
+        """
+        Spherical linear interpolation between self and other.
+
+        Args:
+            other: Target quaternion
+            t: Interpolation parameter in [0, 1], where 0 returns self, 1 returns other
+
+        Returns:
+            Interpolated quaternion
+        """
+        # Ensure shortest path by checking dot product
+        q1 = self.as_array()
+        q2 = other.as_array()
+
+        dot = np.dot(q1, q2)
+        if dot < 0:
+            q2 = -q2
+            dot = -dot
+
+        # If quaternions are very close, use linear interpolation
+        if dot > 0.9995:
+            result = q1 + t * (q2 - q1)
+            return Quaternion.from_array(result)
+
+        # Compute the angle between quaternions
+        theta_0 = np.arccos(np.clip(dot, -1, 1))
+        theta = theta_0 * t
+
+        # Compute the interpolated quaternion
+        q_perp = q2 - q1 * dot
+        q_perp = q_perp / np.linalg.norm(q_perp)
+
+        result = q1 * np.cos(theta) + q_perp * np.sin(theta)
+        return Quaternion.from_array(result)
+
     def conjugate(self):
         return Quaternion(self.mu, -self.eta)._canonical()
 
@@ -156,7 +192,7 @@ class Quaternion:
             theta = norm_omega * dt
             axis = omega / norm_omega
             delta_q = Quaternion(np.cos(theta/2.0), axis * np.sin(theta/2.0))
-        q_new = self.multiply(delta_q)  # right multiply
+        q_new = self @ delta_q
         return q_new._canonical()
 
     def propagate_rk4(self, omega_start: np.ndarray, omega_end: np.ndarray, dt: float):
@@ -182,7 +218,7 @@ class Quaternion:
         def q_dot(q: 'Quaternion', omega: np.ndarray) -> np.ndarray:
             """Quaternion derivative: q_dot = 0.5 * q ⊗ [0, omega]"""
             omega_quat = Quaternion(0.0, omega)
-            dq = q.multiply(omega_quat)
+            dq = q @ omega_quat
             return 0.5 * np.array([dq.mu, dq.eta[0], dq.eta[1], dq.eta[2]])
 
         def array_to_quat(arr: np.ndarray) -> 'Quaternion':
@@ -207,7 +243,7 @@ class Quaternion:
         q_new = Quaternion(q_new_arr[0], q_new_arr[1:4])
         return q_new.normalize()._canonical()
     
-    def __matmut__(self, other):
+    def __matmul__(self, other):
         """Opertaional overload for @ operator as quaternion multiplication."""
         return self.multiply(other)
     
@@ -218,4 +254,3 @@ class Quaternion:
     def __repr__(self):
         """Official string representation."""
         return self.__str__()
-

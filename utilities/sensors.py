@@ -58,8 +58,16 @@ class SensorMagnetometer:
         self.spike_magnitude: float = spikes_cfg.get("magnitude", 0.0)
         self.spike_probability: float = spikes_cfg.get("probability", 0.0)
 
+        # Freeze config (sensor returns stale data)
+        freeze_cfg = mag_cfg.get("freeze", {})
+        self.freeze_enabled: bool = freeze_cfg.get("enabled", False)
+        self.freeze_start: float = freeze_cfg.get("start_time", 0.0)
+        self.freeze_duration: float = freeze_cfg.get("duration", 0.0)
+        self._frozen_value: np.ndarray = None  # Stored frozen measurement
+        noise_level = mag_cfg["scaling"]["noise_scale"]
+
         # Set measurement noise covariance R = sigma^2 * I
-        self.R = np.eye(3) * self.mag_std**2 
+        self.R = np.eye(3) * self.mag_std**2 * noise_level
         logger.debug(f"Magnetometer measurement noise covariance R set to {self.mag_std**2:.2e} * I")
 
     # ---- internal helpers -------------------------------------------------
@@ -86,17 +94,26 @@ class SensorMagnetometer:
 
     # ---- sensor model -----------------------------------------------------
 
-    def sample(self, q_true: Quaternion, B_n: np.ndarray) -> np.ndarray:
+    def sample(self, q_true: Quaternion, B_n: np.ndarray, t: float = 0.0) -> np.ndarray:
         """Sample a magnetometer measurement from the true state.
 
         Args:
             q_true: True body-to-navigation quaternion (b->n)
             B_n:    Magnetic field in navigation/inertial frame, shape (3,)
+            t:      Current simulation time (for freeze feature)
 
         Returns:
             Magnetometer measurement in body frame, shape (3,).
         """
         B_n = np.asarray(B_n, float).reshape(3)
+
+        # Check if sensor is frozen (returns stale data)
+        if self.freeze_enabled:
+            freeze_end = self.freeze_start + self.freeze_duration
+            if self.freeze_start <= t < freeze_end:
+                if self._frozen_value is not None:
+                    return self._frozen_value.copy()
+                # If we just entered freeze period, store current measurement
 
         # Rotate magnetic field into body frame
         R_nb = q_true.as_rotmat()   # body-to-nav
@@ -114,7 +131,19 @@ class SensorMagnetometer:
         # Add occasional spikes
         spike = self._maybe_spike()
 
-        return z_ideal + noise + spike
+        measurement = z_ideal + noise + spike
+
+        # Store measurement for potential freeze
+        if self.freeze_enabled:
+            freeze_end = self.freeze_start + self.freeze_duration
+            # Store the last measurement before freeze starts
+            if t < self.freeze_start:
+                self._frozen_value = measurement.copy()
+            # Clear frozen value after freeze period ends
+            elif t >= freeze_end:
+                self._frozen_value = None
+
+        return measurement
 
     # ---- ESKF-related methods --------------------------------------------
 
@@ -125,12 +154,14 @@ class SensorMagnetometer:
             z = R_bn · B_n  (rotate reference vector from nav to body)
 
         For right-multiply perturbation q = q_nom ⊗ δq (body-frame):
-            R_bn_true = (I - [δθ]×) · R_bn_nom
+            R_bn_true = (I - [δθ]×) · R_bn_nom^
 
         So:
             z_true = (I - [δθ]×) · R_bn · B_n
                    = z_nom - [δθ]× · z_nom
                    = z_nom + [z_nom]× · δθ  (using -[a]× b = [b]× a)
+        Meaning the innovationn z_true - z_nom is:
+            ν = [z_nom]× · δθ
 
         Therefore:
             ∂z/∂(δθ) = [z_nom]× = [B_b]× = skew(B_b)
@@ -197,10 +228,11 @@ class SensorSunVector:
         spikes_cfg = sun_cfg.get("spikes", {})
         self.spikes_enabled = spikes_cfg.get("enabled", False)
         self.spike_magnitude = spikes_cfg.get("magnitude", 0.0)
+        noise_scale = sun_cfg["scaling"]["noise_scale"]
         self.spike_probability = spikes_cfg.get("probability", 0.0)
 
         # Set measurement noise covariance R = sigma^2 * I
-        self.R = np.eye(3) * self.sun_std**2
+        self.R = np.eye(3) * self.sun_std**2 * noise_scale
 
 
     # ---- internal helpers -------------------------------------------------
@@ -364,7 +396,7 @@ class SensorStarTracker:
         noise_scale = scale_cfg.get("noise_scale", 1.0)
 
         # Set measurement noise covariance R = sigma^2 * I
-        self.R = np.eye(3) * self.st_std**2
+        self.R = np.eye(3) * self.st_std**2 * noise_scale
         logger.debug(f"Star tracker measurement noise covariance R set to {self.st_std**2:.2e} * I")
 
     # ---------- internal helpers ----------
@@ -452,7 +484,7 @@ class SensorStarTracker:
             q_error = Quaternion(mu, eta)
 
         # Right-multiply: q_meas = q_true ⊗ q_error (body-frame perturbation)
-        return q_true.multiply(q_error)
+        return q_true @ q_error
 
     # ---------- ESKF interface (unchanged) ----------
 
@@ -477,7 +509,7 @@ class SensorStarTracker:
             q_meas = Quaternion(arr_meas[0], arr_meas[1:4])
 
         # Error quaternion: δq = q_nom^{-1} ⊗ q_meas (right-multiply convention)
-        q_err = q_nom.conjugate().multiply(q_meas)
+        q_err = q_nom.conjugate() @ q_meas
         return 2.0 * q_err.eta
 
     def pred_from_est(self, x_est: EskfState, q_meas: Quaternion) -> MultiVarGauss[np.ndarray]:

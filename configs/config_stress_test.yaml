@@ -1,0 +1,71 @@
+# Stress Test Scenario - Multiple sensor anomalies
+# Tests estimator robustness against realistic degraded conditions:
+# - Magnetometer bias (uncalibrated hard-iron)
+# - High dropout rates
+# - Measurement spikes/outliers
+# - Misdetections
+time:
+  process_dt: 0.02
+  sim_dt: 0.02
+  sim_T: 300.0
+  start_jd: 2459980.5
+sensors:
+  gyro:
+    dt: 0.02
+    noise:
+      arw_deg: 0.15
+      rrw_deg: 0.5
+    scaling:
+      noise_scale: 1.0
+  mag:
+    mag_std: 0.015
+    dt: 0.2
+    # Significant hard-iron bias (10% of unit vector in X and Y)
+    hard_iron: [0.10, 0.08, 0.0]
+    spikes:
+      enabled: true
+      probability: 0.05      # 5% outlier rate
+      magnitude: 0.5         # Large spikes
+    scaling:
+      noise_scale: 8.0
+  sun:
+    dt: 2.0
+    fov_deg: 120.0
+    noise:
+      sun_std: 0.027
+    dropout:
+      probability: 0.15      # 15% dropout rate
+      use_measurements: true
+    spikes:
+      enabled: true
+      probability: 0.03      # 3% outlier rate
+      magnitude: 0.4
+    scaling:
+      noise_scale: 8.0
+  star:
+    dt: 5.0
+    noise:
+      st_std: 0.00024
+    dropout:
+      probability: 0.20      # 20% dropout rate
+      use_measurements: true
+      max_rate_deg_s: 5.0
+    spikes:
+      enabled: true
+      probability: 0.02      # 2% outlier rate (rare but impactful)
+      magnitude: 0.3
+    scaling:
+      noise_scale: 8.0
+process_model:
+  dt: 0.02
+omega_profile:
+  amplitude:
+    x: 0.02
+    y: 0.01
+    z: 0.015
+  frequency:
+    x: 0.01
+    y: 0.008
+    z: 0.005
+simulation:
+  run_name: stress_test_scenario

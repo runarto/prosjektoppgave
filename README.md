@@ -1,201 +1,263 @@
-# Attitude Estimation: ESKF vs Factor Graph Optimization
+# Spacecraft Attitude Estimation
 
-Comparison of Error-State Kalman Filter (ESKF) and Factor Graph Optimization (FGO) for spacecraft attitude estimation using realistic space-grade sensor data.
+Attitude estimation framework for spacecraft using multiple sensor fusion. Implements three estimators: ESKF (Error-State Kalman Filter), iSAM2 (incremental smoothing), and a Redundant estimator combining both.
 
-## Documentation
+## Setup
 
-- **[HYBRID_ESTIMATOR.md](HYBRID_ESTIMATOR.md)** - Architecture and implementation of the hybrid ESKF+FGO estimator
-- **[docs/SCENARIOS.md](docs/SCENARIOS.md)** - Scenario generation, validation, and fixes
-- **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Quick start guide
-- **[docs/PERFORMANCE_GUIDE.md](docs/PERFORMANCE_GUIDE.md)** - Performance tuning guide
-- **[docs/TEST_SCENARIOS_GUIDE.md](docs/TEST_SCENARIOS_GUIDE.md)** - Testing scenarios guide
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install numpy scipy matplotlib pyyaml gtsam
+```
 
 ## Project Structure
 
 ```
 .
-├── configs/                    # Scenario configurations
-│   ├── config_spacegrade_realistic.yaml   # Baseline scenario
-│   ├── config_rapid_tumbling.yaml         # High angular rates
-│   ├── config_eclipse.yaml                # Sun sensor dropout
-│   └── config_measurement_spikes.yaml     # Measurement outliers
-│
-├── scripts/                    # Data generation scripts
-│   └── generate_all_scenarios.py          # Generate all test scenarios
-│
-├── tests/                      # Test and comparison scripts
-│   ├── test_eskf_with_db.py              # ESKF on database runs
-│   ├── test_gtsam_with_db.py             # FGO on database runs
-│   ├── test_manual_eskf.py               # Manual ESKF test
-│   ├── test_manual_eskf_spikes.py        # ESKF with outlier rejection
-│   └── test_comparison.py                # ESKF vs FGO comparison
-│
-├── plotting/                   # Visualization tools
-│   ├── attitude_plotter.py               # Attitude-specific plots
-│   ├── comparison_plotter.py             # ESKF vs FGO comparison plots
-│   └── data_plotter.py                   # General data plotting
-│
-├── sim/                        # Estimation implementations
-│   ├── eskf.py                           # Manual ESKF implementation
-│   ├── eskf_filterpy.py                  # FilterPy-based ESKF
-│   ├── gtsam_fg.py                       # GTSAM factor graph
-|   ├── hybrid_estimator                  # Hybrid and redundant architecture for KF + FG
-│   └── fg.py                             # Custom factor graph
-│
-├── data/                       # Data generation and management
-│   ├── generator_enhanced.py             # Simulation data generator
-│   └── db.py                             # Database interface
-│
-├── utilities/                  # Core utilities
-│   ├── quaternion.py                     # Quaternion math
-│   ├── states.py                         # State representations
-│   ├── sensors.py                        # Sensor models
-│   └── process_model.py                  # Process dynamics
-│
-└── environment/                # Environment models
-    └── environment.py                    # Orbit, magnetic field, sun vector
+├── configs/                 # Scenario configuration files (YAML)
+├── data/                    # Data generation
+│   ├── generator_enhanced.py   # Simulation data generator
+│   ├── db.py                    # SQLite database interface
+│   └── classes.py               # Data classes
+├── estimation/              # Estimator implementations
+│   ├── eskf.py                  # Error-State Kalman Filter
+│   ├── keyframe_fgo.py          # iSAM2 factor graph optimization
+│   ├── fixed_lag_smoother.py    # Fixed-lag smoother for redundant
+│   └── redundant_estimator.py   # ESKF + Smoother with fault detection
+├── utilities/               # Core utilities
+│   ├── quaternion.py            # Quaternion operations
+│   ├── states.py                # State representations
+│   ├── sensors.py               # Sensor models
+│   └── process_model.py         # Process dynamics
+├── environment/             # Environment models (orbit, mag field, sun)
+├── plotting/                # Visualization tools
+├── scripts/                 # Analysis and comparison scripts
+└── simulations.db           # SQLite database with simulation data
 ```
 
-## Setup
-
-Create a virtual environment and install dependencies:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-pip install numpy scipy matplotlib pyyaml gtsam filterpy
-```
-
-**Note:** The `pyIGRF` library requires a coefficient file. Download it from the pyIGRF repository and place it in the appropriate location if you encounter errors.
-
-## Test Scenarios
-
-### 1. Baseline (Realistic Space-Grade)
-- Nominal dynamics (~1°/s angular velocity)
-- Space-grade sensors (FOG gyro, nT magnetometer, arcsecond star tracker)
-- 5% star tracker dropout
-- 50-minute duration
-
-### 2. Rapid Tumbling
-- High angular velocities (up to ~8.6°/s)
-- Star tracker dropout above 2°/s
-- Tests filter performance during aggressive maneuvers
-
-### 3. Eclipse
-- 30% sun sensor dropout (simulating eclipse periods)
-- Tests degraded observability
-
-### 4. Measurement Spikes
-- Large random measurement outliers (500x-100x nominal noise)
-- 0.5% probability of spikes on all sensors
-- Tests outlier rejection mechanisms
-
-## Usage
+## Quick Start
 
 ### 1. Generate Simulation Data
 
-```bash
-python scripts/generate_all_scenarios.py
+```python
+from data.generator_enhanced import EnhancedAttitudeDataGenerator
+
+generator = EnhancedAttitudeDataGenerator(
+    db_path="simulations.db",
+    config_path="configs/config_baseline_short.yaml"
+)
+run_id = generator.generate()
+print(f"Generated simulation run ID: {run_id}")
 ```
 
-This generates all four scenarios and stores them in `simulations.db`.
+### 2. Run ESKF
 
-### 2. Run ESKF vs FGO Comparison
+```python
+from data.db import SimulationDatabase
+from estimation.eskf import ESKF
+from utilities.quaternion import Quaternion
+from utilities.states import NominalState, EskfState, SensorType
+from utilities.gaussian import MultiVarGauss
+import numpy as np
 
-```bash
-python tests/test_comparison.py
+# Load simulation
+db = SimulationDatabase("simulations.db")
+sim = db.load_run(run_id)
+
+# Initialize ESKF
+P0 = np.diag([1.0, 1.0, 1.0, 1e-4, 1e-4, 1e-4])  # attitude (rad^2), bias
+eskf = ESKF(P0=P0, config_path="configs/config_baseline_short.yaml")
+
+# Initial state
+q0 = Quaternion.from_array(sim.q_true[0])
+nom0 = NominalState(ori=q0, gyro_bias=np.zeros(3))
+err0 = MultiVarGauss(np.zeros(6), P0)
+x_est = EskfState(nom=nom0, err=err0)
+
+# Run filter
+for k in range(1, len(sim.t)):
+    dt = sim.t[k] - sim.t[k-1]
+
+    # Predict with gyro
+    x_est = eskf.predict(x_est, sim.omega_meas[k], dt)
+
+    # Update with magnetometer
+    if not np.any(np.isnan(sim.mag_meas[k])):
+        x_est = eskf.update(x_est, sim.mag_meas[k], SensorType.MAGNETOMETER, B_n=sim.b_eci[k])
+
+    # Update with sun sensor
+    if not np.any(np.isnan(sim.sun_meas[k])):
+        x_est = eskf.update(x_est, sim.sun_meas[k], SensorType.SUN_VECTOR, s_n=sim.s_eci[k])
+
+    # Update with star tracker
+    if not np.any(np.isnan(sim.st_meas[k])):
+        q_meas = Quaternion.from_array(sim.st_meas[k])
+        x_est = eskf.update(x_est, q_meas, SensorType.STAR_TRACKER)
+
+# Access estimate
+print(f"Final quaternion: {x_est.nom.ori}")
+print(f"Final gyro bias: {x_est.nom.gyro_bias}")
 ```
 
-This:
-- Runs both ESKF and FGO on all scenarios
-- Generates comparison plots in `output/`
-- Prints performance statistics
+### 3. Run iSAM2
 
-### 3. Run Individual Tests
+```python
+from estimation.keyframe_fgo import KeyframeFGO
+from utilities.quaternion import Quaternion
+from utilities.states import NominalState
+import numpy as np
 
-```bash
-# Test ESKF only
-python tests/test_manual_eskf.py
+# Initialize iSAM2
+fgo = KeyframeFGO(config_path="configs/config_baseline_short.yaml")
 
-# Test ESKF with outlier rejection
-python tests/test_manual_eskf_spikes.py
+# Initial state
+q0 = Quaternion.from_array(sim.q_true[0])
+b0 = np.zeros(3)
+nom0 = NominalState(ori=q0, gyro_bias=b0)
 
-# Test FGO
-python tests/test_gtsam_with_db.py
+fgo.initialize(nom0, sim.t[0], sim.jd[0])
+
+# Process measurements
+for k in range(1, len(sim.t)):
+    # Add gyro measurement (always)
+    fgo.add_gyro(sim.omega_meas[k], sim.t[k], sim.jd[k])
+
+    # Add vector measurements when available
+    if not np.any(np.isnan(sim.mag_meas[k])):
+        fgo.add_magnetometer(sim.mag_meas[k], sim.b_eci[k])
+
+    if not np.any(np.isnan(sim.sun_meas[k])):
+        fgo.add_sun_sensor(sim.sun_meas[k], sim.s_eci[k])
+
+    if not np.any(np.isnan(sim.st_meas[k])):
+        q_meas = Quaternion.from_array(sim.st_meas[k])
+        fgo.add_star_tracker(q_meas)
+
+# Get optimized estimate
+result = fgo.get_current_estimate()
+print(f"Optimized quaternion: {result.ori}")
+print(f"Optimized gyro bias: {result.gyro_bias}")
 ```
 
-## Results
+### 4. Run Redundant Estimator
 
-All comparison plots and results are saved to the `output/` directory:
+The redundant estimator runs ESKF and a fixed-lag smoother in parallel with automatic fault detection and switching.
 
-- `{scenario}_comparison.png` - Time-series comparison
-- `{scenario}_statistics.png` - Statistical comparison (mean, std, max)
-- `all_scenarios_comparison.png` - Multi-scenario overview
+```python
+from estimation.redundant_estimator import RedundantEstimator
+from utilities.quaternion import Quaternion
+from utilities.states import NominalState, EskfState
+from utilities.gaussian import MultiVarGauss
+import numpy as np
 
-## Key Features
+# Initialize
+P0 = np.diag([1.0, 1.0, 1.0, 1e-4, 1e-4, 1e-4])
+redundant = RedundantEstimator(
+    P0=P0,
+    config_path="configs/config_baseline_short.yaml",
+    smoother_lag=60.0,              # 60s fixed-lag window
+    disagreement_threshold_deg=2.0,  # Switch if >2 deg disagreement
+)
 
-### ESKF Implementation (`sim/eskf.py`)
-- Chi-squared outlier rejection (99.9% confidence)
-- Adaptive innovation gating using Mahalanobis distance
-- Joseph-form covariance update for numerical stability
-- Covariance regularization to prevent numerical issues
+# Initial state
+q0 = Quaternion.from_array(sim.q_true[0])
+nom0 = NominalState(ori=q0, gyro_bias=np.zeros(3))
+err0 = MultiVarGauss(np.zeros(6), P0)
+x_est = EskfState(nom=nom0, err=err0)
 
-### FGO Implementation (`sim/gtsam_fg.py`)
-- GTSAM-based batch smoother
-- Sliding window optimization (configurable window size)
-- Between-factor process model
-- Multi-sensor fusion (magnetometer, sun sensor, star tracker)
+# Run estimator
+for k in range(1, len(sim.t)):
+    dt = sim.t[k] - sim.t[k-1]
+
+    x_est, info = redundant.step(
+        x_eskf=x_est,
+        t=sim.t[k],
+        jd=sim.jd[k],
+        omega_meas=sim.omega_meas[k],
+        dt=dt,
+        z_mag=sim.mag_meas[k] if not np.any(np.isnan(sim.mag_meas[k])) else None,
+        z_sun=sim.sun_meas[k] if not np.any(np.isnan(sim.sun_meas[k])) else None,
+        z_st=Quaternion.from_array(sim.st_meas[k]) if not np.any(np.isnan(sim.st_meas[k])) else None,
+        B_eci=sim.b_eci[k],
+        s_eci=sim.s_eci[k],
+    )
+
+# Check which estimator is primary
+print(f"Primary estimator: {redundant.primary}")
+print(f"Final quaternion: {x_est.nom.ori}")
+```
 
 ## Configuration
 
-Scenario configs are in YAML format. Key parameters:
+Scenarios are defined in YAML files under `configs/`. Key parameters:
 
 ```yaml
+time:
+  sim_dt: 0.02      # Simulation timestep (s)
+  sim_T: 300.0      # Duration (s)
+
 sensors:
   gyro:
+    dt: 0.02
     noise:
-      gyro_std: 1.0e-6        # White noise (rad/s)
-      bias_instability_deg_per_h: 0.01  # Bias drift
+      arw_deg: 0.15           # Angle random walk (deg/sqrt(h))
+      rrw_deg: 0.5            # Rate random walk (deg/h/sqrt(h))
+
+  mag:
+    dt: 0.2
+    mag_std: 0.015            # Measurement noise (normalized)
+
+  sun:
+    dt: 0.5
+    fov_deg: 120.0            # Field of view
+    noise:
+      sun_std: 0.027
+
   star:
+    dt: 5.0
+    noise:
+      st_std: 0.00024         # Very accurate
     dropout:
-      max_rate_deg_s: 2.0     # Dropout threshold
-  spikes:
-    enabled: true
-    probability: 0.005        # Spike probability
+      max_rate_deg_s: 5.0     # Dropout above this rate
 
 omega_profile:
   amplitude:
-    x: 0.15                   # Angular velocity (rad/s)
+    x: 0.02                   # Angular velocity amplitude (rad/s)
+    y: 0.01
+    z: 0.015
+  frequency:
+    x: 0.01                   # Oscillation frequency (Hz)
+    y: 0.008
+    z: 0.005
 ```
 
-## Performance Metrics
+## Estimators
 
-The comparison evaluates:
+| Estimator | Description | Use Case |
+|-----------|-------------|----------|
+| **ESKF** | Error-State Kalman Filter with chi-squared outlier rejection | Real-time, low latency |
+| **iSAM2** | Incremental smoothing with keyframe-based preintegration | Higher accuracy, batch |
+| **Redundant** | ESKF + Fixed-lag smoother with fault detection | Fault tolerance |
 
-1. **Attitude Error**: Angular deviation from true attitude (degrees)
-2. **Bias Error**: Gyro bias estimation error (rad/s)
-3. **Convergence**: Time to achieve steady-state accuracy
-4. **Robustness**: Performance under anomalies (spikes, dropouts)
-5. **Computational Cost**: Execution time
+## Sensors
 
-## Publication-Quality Plots
+- **Gyro**: Angular velocity (always available)
+- **Magnetometer**: Earth's magnetic field direction
+- **Sun sensor**: Sun direction (limited FOV, eclipse dropouts)
+- **Star tracker**: Absolute attitude (dropouts at high rates)
 
-Plots use:
-- Times New Roman font (serif fallback if unavailable)
-- 300 DPI resolution
-- Consistent color scheme (ESKF: blue, FGO: orange)
-- Grid lines with 30% transparency
-- LaTeX-compatible formatting
+## Scripts
 
-Generated plots are suitable for technical reports and conference papers.
+Example scripts are in `scripts/`:
 
-## Example Results
+- `run_eskf_and_plot.py` - Run ESKF and generate plots
+- `run_fgo_and_plot.py` - Run iSAM2 and generate plots
+- `baseline_comparison.py` - Compare ESKF vs iSAM2
+- `fault_detection_*.py` - Fault detection analysis
 
-**Baseline Scenario:**
-- ESKF: Mean error 0.0004°, Final error 0.0004°
-- FGO: Mean error 0.0023°, Final error 0.0215°
+## Quaternion Convention
 
-**Measurement Spikes:**
-- ESKF: 0.49% rejection rate (173 spikes detected)
-- Successfully maintained convergence with chi-squared outlier rejection
+Right-multiply convention (GTSAM compatible):
+- `q` represents rotation from body to inertial frame
+- Error: `q_err = q_true^{-1} * q_est`
+- Propagation: `q_new = q * delta_q`

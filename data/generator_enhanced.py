@@ -16,7 +16,7 @@ from utilities.utils import load_yaml
 
 def quat_diff(q1: Quaternion, q2: Quaternion) -> Quaternion:
     """Compute the quaternion difference q_err = q1 * q2_conjugate."""
-    return q1.multiply(q2.conjugate())
+    return q1 @ q2.conjugate()
 
 
 class EnhancedAttitudeDataGenerator:
@@ -263,7 +263,7 @@ class EnhancedAttitudeDataGenerator:
                         mag_meas_log[k] = frozen_mag
                 else:
                     # Normal measurement
-                    mag_meas = self.mag.sample(q_true=q_true, B_n=B_eci)
+                    mag_meas = self.mag.sample(q_true=q_true, B_n=B_eci, t=t)
                     if mag_meas is None:
                         mag_meas = np.full(3, np.nan)
                     else:

@@ -1,0 +1,63 @@
+# Magnetometer Bias Scenario - Large hard-iron bias
+# Tests robustness to systematic magnetometer errors
+# Simulates uncalibrated spacecraft magnetic field contamination
+time:
+  process_dt: 0.02
+  sim_dt: 0.02
+  sim_T: 300.0
+  start_jd: 2459980.5
+sensors:
+  gyro:
+    dt: 0.02
+    noise:
+      arw_deg: 0.15
+      rrw_deg: 0.5
+    scaling:
+      noise_scale: 1.0
+  mag:
+    mag_std: 0.015
+    dt: 0.2
+    # Large hard-iron bias (~15% of unit vector in each axis)
+    # This represents significant spacecraft-induced magnetic field
+    hard_iron: [0.15, -0.10, 0.12]
+    spikes:
+      enabled: false
+    scaling:
+      noise_scale: 8.0
+  sun:
+    dt: 2.0
+    fov_deg: 120.0
+    noise:
+      sun_std: 0.027
+    dropout:
+      probability: 0.0
+      use_measurements: true
+    spikes:
+      enabled: false
+    scaling:
+      noise_scale: 8.0
+  star:
+    dt: 5.0
+    noise:
+      st_std: 0.00024
+    dropout:
+      probability: 0.05
+      use_measurements: true
+      max_rate_deg_s: 5.0
+    spikes:
+      enabled: false
+    scaling:
+      noise_scale: 8.0
+process_model:
+  dt: 0.02
+omega_profile:
+  amplitude:
+    x: 0.02
+    y: 0.01
+    z: 0.015
+  frequency:
+    x: 0.01
+    y: 0.008
+    z: 0.005
+simulation:
+  run_name: mag_bias_scenario

@@ -1,0 +1,61 @@
+omega_profile:
+  amplitude:
+    x: 0.02
+    y: 0.01
+    z: 0.015
+  frequency:
+    x: 0.01
+    y: 0.008
+    z: 0.005
+process_model:
+  dt: 0.02
+sensors:
+  gyro:
+    dt: 0.02
+    noise:
+      arw_deg: 0.15
+      rrw_deg: 0.5
+    scaling:
+      noise_scale: 2.0
+  mag:
+    dt: 0.2
+    hard_iron:
+    - 0.0
+    - 0.0
+    - 0.0
+    mag_std: 0.015
+    scaling:
+      noise_scale: 1.0
+    spikes:
+      enabled: false
+  star:
+    dropout:
+      max_rate_deg_s: 5.0
+      probability: 0.05
+      use_measurements: true
+    dt: 5.0
+    noise:
+      st_std: 0.00024
+    scaling:
+      noise_scale: 1.0
+    spikes:
+      enabled: false
+  sun:
+    dropout:
+      probability: 0.0
+      use_measurements: true
+    dt: 0.5
+    fov_deg: 120.0
+    noise:
+      sun_std: 0.027
+    scaling:
+      noise_scale: 1.0
+    spikes:
+      enabled: false
+simulation:
+  run_name: normal_measurements
+time:
+  process_dt: 0.02
+  sim_T: 300.0
+  sim_dt: 0.02
+  start_jd: 2459980.5

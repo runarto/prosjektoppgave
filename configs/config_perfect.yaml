@@ -1,0 +1,61 @@
+time:
+  process_dt: 0.02
+  sim_dt: 0.02
+  sim_T: 300.0
+  start_jd: 2459980.5
+sensors:
+  gyro:
+    dt: 0.02
+    noise:
+      # STIM300 specifications (from Safran datasheet)
+      arw_deg: 0.15         # Angle Random Walk [deg/√h]
+      rrw_deg: 0.5          # Rate Random Walk [deg/h/√h] 
+    scaling:
+      noise_scale: 1.0
+  mag:
+    mag_std: 0.0
+    dt: 0.2
+    # Hard-iron bias: residual after calibration (~1% of unit vector)
+    # Represents spacecraft-induced magnetic field offsets
+    hard_iron: [0.0, 0.0, 0.0]
+    spikes:
+      enabled: false
+    scaling:
+      noise_scale: 8.0  # Tuned via ANEES
+  sun:
+    dt: 2.0
+    fov_deg: 120.0
+    noise:
+      sun_std: 0.0
+    dropout:
+      probability: 0.0
+      use_measurements: true
+    spikes:
+      enabled: false
+    scaling:
+      noise_scale: 1.0  # Tuned via ANEES
+  star:
+    dt: 5.0
+    noise:
+      st_std: 0.0
+    dropout:
+      probability: 0.05
+      use_measurements: true
+      max_rate_deg_s: 5.0
+    spikes:
+      enabled: false
+    scaling:
+      noise_scale: 1.0  # Tuned via ANEES
+process_model:
+  dt: 0.02
+omega_profile:
+  amplitude:
+    x: 0.02
+    y: 0.01
+    z: 0.015
+  frequency:
+    x: 0.01
+    y: 0.008
+    z: 0.005
+simulation:
+  run_name: spacegrade_realistic_short

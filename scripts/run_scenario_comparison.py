@@ -60,23 +60,97 @@ class EstimationResult:
     bias_errors_deg_h: Optional[np.ndarray] = None
     final_attitude_error_deg: Optional[float] = None
     rms_attitude_error_deg: Optional[float] = None
+    rms_steady_state_deg: Optional[float] = None  # RMS after convergence
+
+
+def interpolate_to_full_rate(
+    keyframe_times: np.ndarray,
+    keyframe_states: List[NominalState],
+    sim_data,
+) -> Tuple[np.ndarray, List[NominalState]]:
+    """
+    Interpolate keyframe estimates to full simulation rate using gyro propagation.
+
+    Between keyframes, propagate the attitude using gyro measurements (corrected for
+    the estimated bias). This gives a fair comparison with ESKF which is evaluated
+    at every timestep.
+
+    Args:
+        keyframe_times: Times of keyframe estimates
+        keyframe_states: States at keyframes
+        sim_data: Full simulation data with gyro measurements
+
+    Returns:
+        (full_times, full_states): Interpolated results at simulation rate
+    """
+    full_times = []
+    full_states = []
+
+    kf_idx = 0  # Current keyframe index
+
+    for k in range(len(sim_data.t)):
+        t = sim_data.t[k]
+
+        # Find the keyframe interval we're in
+        # Move to next keyframe if we've passed current one
+        while kf_idx < len(keyframe_times) - 1 and t >= keyframe_times[kf_idx + 1]:
+            kf_idx += 1
+
+        if kf_idx >= len(keyframe_states):
+            kf_idx = len(keyframe_states) - 1
+
+        # Get the keyframe state
+        kf_state = keyframe_states[kf_idx]
+        kf_time = keyframe_times[kf_idx]
+
+        if abs(t - kf_time) < 1e-6:
+            # Exactly at keyframe - use keyframe state directly
+            full_states.append(copy.deepcopy(kf_state))
+        else:
+            # Between keyframes - propagate from keyframe using gyro
+            # Find simulation indices from keyframe time to current time
+            kf_sim_idx = np.argmin(np.abs(sim_data.t - kf_time))
+
+            # Start from keyframe state
+            q_prop = kf_state.ori.copy()
+            b_est = kf_state.gyro_bias.copy()
+
+            # Propagate through each gyro measurement
+            for i in range(kf_sim_idx, k):
+                if i + 1 < len(sim_data.t):
+                    dt = sim_data.t[i + 1] - sim_data.t[i]
+                    omega = sim_data.omega_meas[i + 1]
+                    if not np.any(np.isnan(omega)):
+                        omega_corrected = omega - b_est
+                        q_prop = q_prop.propagate(omega_corrected, dt)
+
+            # Create interpolated state
+            interp_state = NominalState(ori=q_prop, gyro_bias=b_est.copy())
+            full_states.append(interp_state)
+
+        full_times.append(t)
+
+    return np.array(full_times), full_states
 
 
 def run_eskf(
     sim_data,
     config_path: str,
+    initial_error_deg: float = 10.0,
 ) -> EstimationResult:
     """Run ESKF estimator."""
-    print("\n  Running ESKF...")
+    print(f"\n  Running ESKF (init err: {initial_error_deg}°)...")
     start_time = time.time()
 
-    att_err = np.pi
-    P0 = np.diag([att_err**2, att_err**2, att_err**2, 1e-6, 1e-6, 1e-6])
+    att_err_rad = np.deg2rad(initial_error_deg)
+    P0 = np.diag([att_err_rad**2, att_err_rad**2, att_err_rad**2, 1e-6, 1e-6, 1e-6])
     eskf = ESKF(P0=P0, config_path=config_path)
 
-    # Initial state with small error
+    # Initial state with error
     q0_true = Quaternion.from_array(sim_data.q_true[0])
-    q0_est = q0_true.multiply(Quaternion.from_avec(np.array([np.pi, np.pi, np.pi]))).normalize()
+    # Create perturbation of specified magnitude
+    perturb = np.array([att_err_rad, att_err_rad, att_err_rad]) / np.sqrt(3)  # ~10 deg total
+    q0_est = q0_true.multiply(Quaternion.from_avec(perturb)).normalize()
     b0_est = np.zeros(3)
 
     nom0 = NominalState(ori=q0_est, gyro_bias=b0_est)
@@ -139,23 +213,27 @@ def run_eskf(
 def run_hybrid(
     sim_data,
     config_path: str,
+    initial_error_deg: float = 10.0,
 ) -> EstimationResult:
     """Run Hybrid ESKF+FGO estimator."""
-    print("\n  Running Hybrid (ESKF+FGO)...")
+    print(f"\n  Running Hybrid (init err: {initial_error_deg}°)...")
     start_time = time.time()
 
-    P0 = np.diag([0.01, 0.01, 0.01, 1e-4, 1e-4, 1e-4])
+    att_err_rad = np.deg2rad(initial_error_deg)
+    P0 = np.diag([att_err_rad**2, att_err_rad**2, att_err_rad**2, 1e-6, 1e-6, 1e-6])
     hybrid = HybridEstimator(
         P0=P0,
         config_path=config_path,
-        fgo_window_size=100,
-        fgo_optimize_interval=10.0,
+        fgo_window_duration=120.0,  # 120 second sliding window (more ST measurements)
+        fgo_optimize_interval=60.0,  # Batch optimize every 60 seconds
         use_robust=True,
+        correction_mode="normal",
     )
 
-    # Initial state with error
+    # Initial state with error (same as ESKF for fair comparison)
     q0_true = Quaternion.from_array(sim_data.q_true[0])
-    q0_est = q0_true.multiply(Quaternion.from_avec(np.array([np.pi, np.pi, np.pi]))).normalize()
+    perturb = np.array([att_err_rad, att_err_rad, att_err_rad]) / np.sqrt(3)
+    q0_est = q0_true.multiply(Quaternion.from_avec(perturb)).normalize()
     b0_est = np.zeros(3)
 
     nom0 = NominalState(ori=q0_est, gyro_bias=b0_est)
@@ -228,14 +306,19 @@ def run_fgo(
         use_rk4=True,
     )
 
-    times, states = fgo.process_simulation(sim_data, env)
+    kf_times, kf_states = fgo.process_simulation(sim_data, env)
+
+    # Interpolate to full rate for fair comparison
+    times, states = interpolate_to_full_rate(
+        np.array(kf_times), kf_states, sim_data
+    )
 
     runtime = time.time() - start_time
-    print(f"    Completed in {runtime:.2f}s ({len(states)} keyframes)")
+    print(f"    Completed in {runtime:.2f}s ({len(kf_states)} keyframes -> {len(states)} samples)")
 
     return EstimationResult(
         name=name,
-        times=np.array(times),
+        times=times,
         states=states,
         runtime_s=runtime,
     )
@@ -244,8 +327,15 @@ def run_fgo(
 def compute_metrics(
     result: EstimationResult,
     sim_data,
+    convergence_time: float = 30.0,
 ) -> EstimationResult:
-    """Compute error metrics for an estimation result."""
+    """Compute error metrics for an estimation result.
+
+    Args:
+        result: Estimation result to compute metrics for
+        sim_data: Simulation data with ground truth
+        convergence_time: Time in seconds to exclude for steady-state RMS
+    """
     # Find matching indices
     attitude_errors = []
     bias_errors = []
@@ -274,26 +364,36 @@ def compute_metrics(
     result.final_attitude_error_deg = attitude_errors[-1] if attitude_errors else None
     result.rms_attitude_error_deg = np.sqrt(np.mean(np.array(attitude_errors)**2)) if attitude_errors else None
 
+    # Compute steady-state RMS (excluding convergence period)
+    steady_state_mask = result.times >= convergence_time
+    if np.any(steady_state_mask):
+        steady_errors = result.attitude_errors_deg[steady_state_mask]
+        result.rms_steady_state_deg = np.sqrt(np.mean(steady_errors**2))
+    else:
+        result.rms_steady_state_deg = result.rms_attitude_error_deg
+
     return result
 
 
 def print_comparison_table(results: List[EstimationResult]):
     """Print comparison table."""
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 90)
     print("ESTIMATOR COMPARISON RESULTS")
-    print("=" * 80)
+    print("=" * 90)
 
-    print(f"\n{'Estimator':<20} {'Runtime':>10} {'Final Err':>12} {'RMS Err':>12} {'Samples':>10}")
-    print("-" * 70)
+    print(f"\n{'Estimator':<20} {'Runtime':>8} {'Final Err':>12} {'RMS (all)':>12} {'RMS (t>30s)':>12} {'Samples':>8}")
+    print("-" * 90)
 
     for r in results:
         runtime = f"{r.runtime_s:.2f}s"
-        final_err = f"{r.final_attitude_error_deg:.4f} deg" if r.final_attitude_error_deg is not None else "N/A"
-        rms_err = f"{r.rms_attitude_error_deg:.4f} deg" if r.rms_attitude_error_deg is not None else "N/A"
+        final_err = f"{r.final_attitude_error_deg:.4f}°" if r.final_attitude_error_deg is not None else "N/A"
+        rms_err = f"{r.rms_attitude_error_deg:.4f}°" if r.rms_attitude_error_deg is not None else "N/A"
+        rms_ss = f"{r.rms_steady_state_deg:.4f}°" if r.rms_steady_state_deg is not None else "N/A"
         samples = f"{len(r.times)}"
-        print(f"{r.name:<20} {runtime:>10} {final_err:>12} {rms_err:>12} {samples:>10}")
+        print(f"{r.name:<20} {runtime:>8} {final_err:>12} {rms_err:>12} {rms_ss:>12} {samples:>8}")
 
-    print("-" * 70)
+    print("-" * 90)
+    print("Note: RMS (t>30s) excludes first 30s convergence period")
 
 
 def run_comparison(

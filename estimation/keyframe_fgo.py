@@ -202,6 +202,8 @@ class KeyframeFactorBuilders:
         sigma_star: float,
         sigma_bias: float,
         use_robust: bool = True,
+        robust_kernel: str = "huber",  # huber, cauchy, welsch, tukey, geman, fair, dcs
+        robust_param: float = 0.1,      # kernel-specific parameter
     ):
         self.gyro_cov = gyro_cov
         self.sigma_mag = sigma_mag
@@ -209,19 +211,38 @@ class KeyframeFactorBuilders:
         self.sigma_star = sigma_star
         self.sigma_bias = sigma_bias
         self.use_robust = use_robust
+        self.robust_kernel = robust_kernel.lower()
+        self.robust_param = robust_param
 
         # Setup GTSAM preintegration params (for Euler fallback)
         self.preint_params = gtsam.PreintegrationParams.MakeSharedU(9.81)
         self.preint_params.setGyroscopeCovariance(gyro_cov)
 
     def _robust_noise(self, base_noise):
-        """Apply Huber robust kernel."""
+        """Apply robust kernel to noise model."""
         if not self.use_robust:
             return base_noise
-        return gtsam.noiseModel.Robust.Create(
-            gtsam.noiseModel.mEstimator.Huber.Create(1.345),
-            base_noise
-        )
+
+        # Create M-estimator based on kernel type
+        if self.robust_kernel == "huber":
+            kernel = gtsam.noiseModel.mEstimator.Huber.Create(self.robust_param)
+        elif self.robust_kernel == "cauchy":
+            kernel = gtsam.noiseModel.mEstimator.Cauchy.Create(self.robust_param)
+        elif self.robust_kernel == "welsch":
+            kernel = gtsam.noiseModel.mEstimator.Welsch.Create(self.robust_param)
+        elif self.robust_kernel == "tukey":
+            kernel = gtsam.noiseModel.mEstimator.Tukey.Create(self.robust_param)
+        elif self.robust_kernel == "geman":
+            kernel = gtsam.noiseModel.mEstimator.GemanMcClure.Create(self.robust_param)
+        elif self.robust_kernel == "fair":
+            kernel = gtsam.noiseModel.mEstimator.Fair.Create(self.robust_param)
+        elif self.robust_kernel == "dcs":
+            kernel = gtsam.noiseModel.mEstimator.DCS.Create(self.robust_param)
+        else:
+            # Default to Huber
+            kernel = gtsam.noiseModel.mEstimator.Huber.Create(self.robust_param)
+
+        return gtsam.noiseModel.Robust.Create(kernel, base_noise)
 
     def create_preintegration(self, bias: np.ndarray) -> gtsam.PreintegratedAhrsMeasurements:
         """Create a new GTSAM preintegration object (Euler method)."""
@@ -281,35 +302,42 @@ class KeyframeFactorBuilders:
         key_R: int,
         z_mag: np.ndarray,
         B_eci: np.ndarray,
-    ) -> gtsam.MagFactor1:
+        normalize: bool = True,
+    ) -> gtsam.CustomFactor:
         """Vector measurement factor for magnetometer.
 
-        Measurement model: z_body = R_bn @ B_nav / |B_nav| + noise
-        We use direction-only (normalized) measurements with scale=1.0.
-        """
-        v_meas = z_mag / np.linalg.norm(z_mag)  # Normalize measurement
-        v_ref = B_eci / np.linalg.norm(B_eci)   # Normalize reference
+        Measurement model: z_body = R_bn^T @ B_nav + noise
 
-        # Use scale=1.0 since we're comparing unit vectors
-        scale = 1.0
-        direction = gtsam.Unit3(*v_ref)
+        Args:
+            key_R: Symbol key for rotation
+            z_mag: Magnetometer measurement in body frame
+            B_eci: Reference magnetic field in ECI frame
+            normalize: If True, normalize both vectors (direction-only).
+                      If False, use raw vectors (preserves magnitude info).
+        """
+        if normalize:
+            v_meas = z_mag / np.linalg.norm(z_mag)
+            v_ref = B_eci / np.linalg.norm(B_eci)
+        else:
+            v_meas = z_mag.copy()
+            v_ref = B_eci.copy()
 
         base_noise = gtsam.noiseModel.Gaussian.Covariance(np.eye(3) * (self.sigma_mag ** 2))
         noise = self._robust_noise(base_noise)
+        keys = [key_R]
 
-        bias = gtsam.Point3(0, 0, 0)  # No hard-iron bias estimation
+        def error_fn(this, values, jacobians=None):
+            R = values.atRot3(key_R)
+            R_nb = R.matrix()  # body-to-nav rotation matrix
+            v_pred = R_nb.T @ v_ref  # predicted measurement in body frame
+            e = v_meas - v_pred
 
-        factor = gtsam.MagFactor1(
-            key_R,
-            v_meas,
-            scale,
-            direction,
-            bias,
-            noise
-        )
+            if jacobians is not None:
+                # Jacobian for right perturbation: de/dδθ = -skew(v_pred)
+                jacobians[0] = -skew(v_pred)
+            return e
 
-        return factor
-
+        return gtsam.CustomFactor(noise, keys, error_fn)
 
     def make_sun_factor(
         self,
@@ -402,12 +430,15 @@ class KeyframeFGO:
         self,
         config_path: str = "configs/config_baseline_short.yaml",
         use_robust: bool = True,
+        robust_kernel: str = "cauchy",  # huber, cauchy, welsch, tukey, geman, fair, dcs
+        robust_param: float = 0.1,      # kernel-specific parameter
         discretization_factor: float = 0.10,
         use_isam2: bool = False,
-        use_rk4: bool = True,  # RK4 is default
-        isam2_relinearize_threshold: float = 0.0001,
+        use_rk4: bool = False,  # RK4 is default
+        isam2_relinearize_threshold: float = 0.001,
         isam2_relinearize_skip: int = 1,
         isam2_finalize_updates: int = 5,
+        perturb_initial: bool = True,  # Perturb initial attitude (set False for hybrid mode)
     ):
         self.config = load_yaml(config_path)
         self.process = ProcessModel(config_path)
@@ -416,6 +447,7 @@ class KeyframeFGO:
         self.isam2_relinearize_threshold = isam2_relinearize_threshold
         self.isam2_relinearize_skip = isam2_relinearize_skip
         self.isam2_finalize_updates = isam2_finalize_updates
+        self.perturb_initial = perturb_initial
 
         # Extract noise parameters
         mag_inflation = self.config["sensors"]["mag"].get("fgo_noise_inflation", 1.0)
@@ -436,6 +468,8 @@ class KeyframeFGO:
             sigma_star=self.config["sensors"]["star"]["noise"]["st_std"],
             sigma_bias=self.process.sigma_bg,
             use_robust=use_robust,
+            robust_kernel=robust_kernel,
+            robust_param=robust_param,
         )
 
         # State
@@ -449,9 +483,16 @@ class KeyframeFGO:
         # KF estimates for initialization
         self.kf_estimates = None
 
+        # Final optimization error (useful for diagnostics)
+        self.final_error: float = float("inf")
+
         mode = "iSAM2 (incremental)" if use_isam2 else "Batch LM"
         preint_mode = "RK4" if use_rk4 else "GTSAM (Euler)"
         logger.info(f"KeyframeFGO initialized, mode: {mode}, preintegration: {preint_mode}")
+
+    def get_final_error(self) -> float:
+        """Return the final optimization error (lower is better)."""
+        return self.final_error
 
     @staticmethod
     def X(k: int) -> int:
@@ -497,7 +538,7 @@ class KeyframeFGO:
         Interpolate between keyframes to get full-rate estimates.
 
         Uses optimized bias from keyframes and propagates attitude using gyro
-        measurements between keyframes.
+        measurements between keyframes with RK4 integration for accuracy.
 
         Args:
             keyframe_times: Times of keyframe estimates
@@ -512,6 +553,7 @@ class KeyframeFGO:
 
         kf_idx = 0
         current_state = keyframe_states[0]
+        at_keyframe = True  # Flag to indicate we're at a keyframe
 
         for k in range(len(sim_data.t)):
             t = sim_data.t[k]
@@ -520,14 +562,16 @@ class KeyframeFGO:
             if kf_idx + 1 < len(keyframe_times) and t >= keyframe_times[kf_idx + 1] - 1e-6:
                 kf_idx += 1
                 current_state = keyframe_states[kf_idx]
+                at_keyframe = True  # Reset to keyframe state
 
-            if k == 0:
-                # First sample - use initial keyframe state
+            if k == 0 or at_keyframe:
+                # At keyframe - use optimized keyframe state directly
                 all_times.append(t)
                 all_states.append(NominalState(
                     ori=current_state.ori.copy(),
                     gyro_bias=current_state.gyro_bias.copy(),
                 ))
+                at_keyframe = False
             else:
                 # Propagate from previous state using gyro
                 dt = sim_data.t[k] - sim_data.t[k-1]
@@ -539,7 +583,7 @@ class KeyframeFGO:
                 # Use bias from current keyframe
                 omega_corrected = omega - current_state.gyro_bias
 
-                # Propagate attitude (right-multiply convention)
+                # Propagate attitude using exponential map (right-multiply convention)
                 q_new = all_states[-1].ori.propagate(omega_corrected, dt)
 
                 all_times.append(t)
@@ -624,7 +668,8 @@ class KeyframeFGO:
             optimizer = gtsam.LevenbergMarquardtOptimizer(graph, values, params)
             result = optimizer.optimize()
 
-            logger.info(f"  Iteration {iteration + 1} complete, final error: {optimizer.error():.6f}")
+            self.final_error = optimizer.error()
+            logger.info(f"  Iteration {iteration + 1} complete, final error: {self.final_error:.6f}")
 
             # Extract average bias estimate for re-linearization
             bias_estimates = []
@@ -806,8 +851,10 @@ class KeyframeFGO:
 
         # Initial attitude
         q0 = Quaternion.from_array(sim_data.q_true[0])
-        # Perturb initial attitude - right-multiply convention
-        q0 = q0.multiply(Quaternion.from_avec(np.array([np.pi, np.pi, np.pi])))
+        if self.perturb_initial:
+            # Perturb initial attitude - right-multiply convention (for standalone FGO)
+            q0 = q0 @ Quaternion.from_avec(np.array([np.pi, np.pi, np.pi]))
+        # else: use q_true directly (for hybrid mode where ESKF provides good estimate)
         R0 = rot3_from_quat(q0)
 
         # First keyframe
@@ -1122,7 +1169,7 @@ def run_keyframe_fgo(
         q_true = Quaternion.from_array(sim.q_true[idx])
         q_est = state.ori
         # Right-multiply convention: error = q_true * q_est^{-1}
-        q_err = q_true.multiply(q_est.conjugate())
+        q_err = q_true @ q_est.conjugate()
         angle_err = 2 * np.arccos(np.clip(abs(q_err.mu), 0, 1))
         errors.append(np.rad2deg(angle_err))
 
