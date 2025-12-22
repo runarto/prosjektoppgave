@@ -7,7 +7,7 @@ Attitude estimation framework for spacecraft using multiple sensor fusion. Imple
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install numpy scipy matplotlib pyyaml gtsam
+pip install -r requirements.txt
 ```
 
 ## Project Structure

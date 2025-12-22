@@ -1,0 +1,8 @@
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+pyyaml>=6.0
+gtsam>=4.2
+filterpy>=1.4
+pyIGRF>=1.0
+sgp4>=2.20
